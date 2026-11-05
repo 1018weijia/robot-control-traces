@@ -1,0 +1,28 @@
+{
+  "output": {
+    "observation_index": 9,
+    "accepted": true
+  },
+  "observation": {
+    "observation_index": 10,
+    "instruction": "Put the blue block into the bowl.",
+    "native_action_index": 205,
+    "native_budget": 600,
+    "robot_state": {
+      "tcp": [
+        0.4,
+        0.18,
+        0.2
+      ],
+      "gripper_width": 0.031
+    },
+    "images": {
+      "cam_head": "/workspace/demo/runs/demo_000/observations/0010/cam_head.png",
+      "cam_wrist": "/workspace/demo/runs/demo_000/observations/0010/cam_wrist.png"
+    },
+    "image_sha256": {
+      "cam_head": "abc90639169e82a23006c4d358e28bde3e02c0a65bb8cf3c57121d21d254ff7c",
+      "cam_wrist": "ff74f6ea72bb25e9f6ba5e0aaec13aee0636a9573d59822eb601a61a20be406b"
+    }
+  }
+}

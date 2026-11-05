@@ -1,0 +1,63 @@
+{
+  "schema": "robot-control-trace-manifest/v1",
+  "generator": {
+    "name": "robot-control-traces",
+    "version": "0.2.0"
+  },
+  "created_at": "2026-11-05T04:48:05+00:00",
+  "options": {
+    "profiles": [],
+    "auto_profiles": true,
+    "images": "all",
+    "redact": true,
+    "max_chars": 4000,
+    "use_adapters": true,
+    "read_local_files": false,
+    "min_act_steps": 1,
+    "remapped_paths": 1
+  },
+  "sources": [
+    {
+      "rollout_file": "input/codex_home/sessions/2026/01/15/rollout-2026-01-15T09-00-00-0199c0de-0000-7000-8000-00000000c001.jsonl",
+      "rollout_sha256": "6880e3d12ce9c64eee9094279868f1fae5f347a760dc72b364547aaeeeb05d52",
+      "lines": 57,
+      "warnings": 0,
+      "profiles": [
+        "cell-queue",
+        "default"
+      ],
+      "episodes": [
+        "2026-01-15_0199c0de_00"
+      ]
+    },
+    {
+      "rollout_file": "input/codex_home/sessions/2026/01/16/rollout-2026-01-16T14-00-00-0199c0de-0000-7000-8000-00000000c002.jsonl",
+      "rollout_sha256": "00a39dd4c7c1c39de12801425206f40dcad20d575b718996bc7de21589e0027b",
+      "lines": 27,
+      "warnings": 0,
+      "profiles": [
+        "default"
+      ],
+      "episodes": [
+        "2026-01-16_0199c0de_00"
+      ]
+    }
+  ],
+  "episodes": [
+    {
+      "id": "2026-01-15_0199c0de_00",
+      "steps": 7,
+      "rollout": "rollout-2026-01-15T09-00-00-0199c0de-0000-7000-8000-00000000c001.jsonl"
+    },
+    {
+      "id": "2026-01-16_0199c0de_00",
+      "steps": 4,
+      "rollout": "rollout-2026-01-16T14-00-00-0199c0de-0000-7000-8000-00000000c002.jsonl"
+    }
+  ],
+  "redaction": {
+    "enabled": true,
+    "counts": {},
+    "custom_paths": 0
+  }
+}

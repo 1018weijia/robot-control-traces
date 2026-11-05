@@ -1,0 +1,92 @@
+{
+  "schema": "robot-control-trace/v1",
+  "episode_id": "2026-01-15_0199c0de_00",
+  "source": {
+    "rollout_file": "rollout-2026-01-15T09-00-00-0199c0de-0000-7000-8000-00000000c001.jsonl",
+    "rollout_sha256": "6880e3d12ce9c64eee9094279868f1fae5f347a760dc72b364547aaeeeb05d52",
+    "thread_id": "0199c0de-0000-7000-8000-00000000c001",
+    "parent_thread_id": null,
+    "originator": "codex_cli_rs",
+    "cli_version": "0.99.0",
+    "session_source": "cli",
+    "started_at": "2026-01-15T09:00:00.000Z",
+    "cwd": "/workspace/demo",
+    "episode_key": "/workspace/demo/runs/demo_000"
+  },
+  "agent": {
+    "models": [
+      "gpt-5-codex"
+    ],
+    "efforts": [
+      "high"
+    ]
+  },
+  "task": {
+    "prompt": "Put the blue block into the bowl using tools/robot_ctl.py (session runs/demo_000).",
+    "instruction": "Put the blue block into the bowl."
+  },
+  "profile": {
+    "names": [
+      "cell-queue",
+      "default"
+    ],
+    "adapters": [
+      "cell_queue"
+    ]
+  },
+  "stats": {
+    "steps": 7,
+    "images_seen": 7,
+    "images_saved": 7,
+    "with_images": 0.857,
+    "with_observation": 1.0,
+    "with_reasoning": 1.0,
+    "with_analysis_text": 1.0,
+    "with_code": 0.857,
+    "with_calls": 0.857,
+    "with_adjustments": 0.571,
+    "enriched": 1.0,
+    "human_input_steps": 1,
+    "failed_actions": 1
+  },
+  "final": {
+    "messages": [
+      "The blue block is in the bowl and the episode is finished."
+    ],
+    "reasoning": [],
+    "user_messages": [],
+    "observation": {
+      "images": [],
+      "reads": []
+    }
+  },
+  "enrichment": {
+    "cell_queue": {
+      "session": "/workspace/demo/runs/demo_000",
+      "run_config": {
+        "task": "place_block_in_bowl",
+        "native_budget": 600,
+        "cameras": [
+          "cam_head",
+          "cam_wrist"
+        ]
+      },
+      "result": {
+        "task_success": true,
+        "stop_reason": "agent_finish",
+        "native_actions": 280
+      }
+    }
+  },
+  "adapter_stats": {
+    "cell_queue": {
+      "invocations": 14,
+      "matched": {
+        "observation_index": 12,
+        "command_id": 2
+      },
+      "unmatched": {}
+    }
+  },
+  "warnings": []
+}

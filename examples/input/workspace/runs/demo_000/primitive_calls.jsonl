@@ -1,0 +1,9 @@
+{"tool": "move_to", "args": {"target": [0.42, -0.12, 0.13], "speed": 0.15}, "result": {"reached": true, "steps_used": 48}, "native_actions": 48, "wall_s": 1.2}
+{"tool": "move_to", "args": {"target": [0.42, -0.135, 0.13]}, "result": {"reached": true, "steps_used": 12}, "native_actions": 60, "wall_s": 0.3}
+{"tool": "move_to", "args": {"target": [0.42, -0.135, 0.045]}, "result": {"reached": true, "steps_used": 30}, "native_actions": 90, "wall_s": 0.75}
+{"tool": "set_gripper", "args": {"width": 0.0}, "result": {"reached": true, "steps_used": 10}, "native_actions": 100, "wall_s": 0.25}
+{"tool": "move_by", "args": {"delta": [0, 0, 0.12]}, "result": {"reached": true, "steps_used": 30}, "native_actions": 130, "wall_s": 0.75}
+{"tool": "move_to", "args": {"target": [0.4, 0.18, 0.2], "speed": 0.06}, "result": {"reached": true, "steps_used": 75}, "native_actions": 205, "wall_s": 1.88}
+{"tool": "move_to", "args": {"target": [0.4, 0.18, 0.11], "speed": 0.04}, "result": {"reached": true, "steps_used": 45}, "native_actions": 250, "wall_s": 1.12}
+{"tool": "set_gripper", "args": {"width": 0.08}, "result": {"reached": true, "steps_used": 10}, "native_actions": 260, "wall_s": 0.25}
+{"tool": "move_by", "args": {"delta": [0, 0, 0.1]}, "result": {"reached": true, "steps_used": 20}, "native_actions": 280, "wall_s": 0.5}

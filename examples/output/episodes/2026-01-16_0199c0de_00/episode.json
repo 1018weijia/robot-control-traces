@@ -1,0 +1,63 @@
+{
+  "schema": "robot-control-trace/v1",
+  "episode_id": "2026-01-16_0199c0de_00",
+  "source": {
+    "rollout_file": "rollout-2026-01-16T14-00-00-0199c0de-0000-7000-8000-00000000c002.jsonl",
+    "rollout_sha256": "00a39dd4c7c1c39de12801425206f40dcad20d575b718996bc7de21589e0027b",
+    "thread_id": "0199c0de-0000-7000-8000-00000000c002",
+    "parent_thread_id": null,
+    "originator": "codex_cli_rs",
+    "cli_version": "0.99.0",
+    "session_source": "cli",
+    "started_at": "2026-01-16T14:00:00.000Z",
+    "cwd": "/workspace/pusher",
+    "episode_key": null
+  },
+  "agent": {
+    "models": [
+      "gpt-5-codex"
+    ],
+    "efforts": [
+      "high"
+    ]
+  },
+  "task": {
+    "prompt": "Slide the red cube 5 cm to the right without tipping it, then send the arm home.",
+    "instruction": null
+  },
+  "profile": {
+    "names": [
+      "default"
+    ],
+    "adapters": []
+  },
+  "stats": {
+    "steps": 4,
+    "images_seen": 4,
+    "images_saved": 4,
+    "with_images": 1.0,
+    "with_observation": 1.0,
+    "with_reasoning": 0.75,
+    "with_analysis_text": 1.0,
+    "with_code": 0.25,
+    "with_calls": 1.0,
+    "with_adjustments": 0.5,
+    "enriched": 0.0,
+    "human_input_steps": 0,
+    "failed_actions": 0
+  },
+  "final": {
+    "messages": [
+      "The cube is 5 cm to the right and upright; the arm is home."
+    ],
+    "reasoning": [],
+    "user_messages": [],
+    "observation": {
+      "images": [],
+      "reads": []
+    }
+  },
+  "enrichment": {},
+  "adapter_stats": {},
+  "warnings": []
+}

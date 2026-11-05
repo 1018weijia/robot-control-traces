@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+# exports contain conversation text and camera frames
+traces/
+out/

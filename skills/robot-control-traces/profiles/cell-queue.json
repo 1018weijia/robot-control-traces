@@ -1,0 +1,18 @@
+{
+  "name": "cell-queue",
+  "description": "File-queue control sessions: a controller script with observe | ack_visual | cell (python) | finish | poll | where subcommands and a session directory per episode.",
+  "detect": ["\\.py\\b[^\\n;&|]*\\s(ack_visual\\b|cell\\s+--file\\b)"],
+  "rules": [
+    {"label": "where", "role": "aux", "kind": "shell", "command": "\\.py\\b[^\\n;&|]*\\swhere\\b"},
+    {"label": "poll", "role": "result", "kind": "shell", "command": "\\.py\\b[^\\n;&|]*\\spoll\\b"},
+    {"label": "ack_or_observe", "role": "observe", "kind": "shell", "command": "\\.py\\b[^\\n;&|]*\\s(observe|ack_visual)\\b"},
+    {"label": "cell_or_finish", "role": "act", "kind": "shell", "command": "\\.py\\b[^\\n;&|]*\\s(cell|python|finish)\\b"}
+  ],
+  "rationale_options": ["--note", "--evidence"],
+  "code_file_options": ["--file"],
+  "action_calls": "^\\w+\\.(move_to|move_by|move_path|move_joints|set_gripper|home|wait|\\w*execute\\w*|\\w+_step)$",
+  "probe_calls": "^\\w+\\.(state|reachable|back_project|project|triangulate|ray|annotate|image|camera_meta|cameras|\\w*propose\\w*|diagnose\\w*|\\w+_memory|segment\\w*|locate\\w*)$",
+  "episode_key": "--(?:session|output)[= ]+(\\S+)",
+  "persistent_namespace": true,
+  "adapters": ["cell_queue"]
+}

@@ -1,0 +1,8 @@
+{
+  "task": "place_block_in_bowl",
+  "native_budget": 600,
+  "cameras": [
+    "cam_head",
+    "cam_wrist"
+  ]
+}

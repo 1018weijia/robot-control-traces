@@ -96,7 +96,9 @@ def _step(step):
     act, obs, analysis, outcome = step["action"], step["observation"], step["analysis"], step["outcome"]
     when = (step["time"].get("action") or "")[11:19]
     out = [f"## Step {step['step_index']} · `{act['signature']}`" + (f" · {when}" if when else ""), ""]
-    flags = [name for name, on in step["flags"].items() if on]
+    flags = [name for name, on in step["flags"].items() if on and name != "control"]
+    if step["flags"].get("control") is False:
+        flags.append("no control evidence")
     if flags:
         out += ["Flags: " + ", ".join(flags), ""]
 

@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from . import audit
 from .steps import SCHEMA
 
 STEP_FIELDS = {"schema": str, "episode_id": str, "step_index": int, "time": dict, "turn": int,
@@ -81,6 +82,7 @@ def validate(out):
                 samples.append(_sample(step))
     totals["episodes"] = len(manifest.get("episodes", []))
     totals["skipped_sources"] = sum(1 for s in manifest.get("sources", []) if s.get("skipped"))
+    totals["privacy"] = audit.scan([out / "episodes"]) if manifest.get("redaction", {}).get("enabled", True) else {}
     return errors, totals, samples
 
 
@@ -99,6 +101,7 @@ def _tally(totals, step):
     bump("with_adjustments", act.get("adjustments"))
     bump("enriched", step.get("enrichment"))
     bump("human_input", (step.get("flags") or {}).get("human_input"))
+    bump("control", (step.get("flags") or {}).get("control"))
 
 
 def _sample(step):
@@ -116,9 +119,11 @@ def format_report(errors, totals, samples):
     lines.append(f"episodes {totals.get('episodes', 0)}, steps {steps}, skipped sources "
                  f"{totals.get('skipped_sources', 0)}")
     for key in ("with_images", "with_any_observation", "with_reasoning", "with_rationale", "with_any_analysis",
-                "with_code", "with_calls", "with_adjustments", "enriched", "human_input"):
+                "with_code", "with_calls", "with_adjustments", "enriched", "human_input", "control"):
         value = totals.get(key, 0)
         lines.append(f"  {key:<22} {value:>6}  ({value / steps:.0%})" if steps else f"  {key:<22} {value:>6}")
+    if "privacy" in totals:
+        lines.append(audit.format_findings(totals["privacy"]))
     if samples:
         lines.append("samples (check that redaction and segmentation look right):")
         for sample in samples:

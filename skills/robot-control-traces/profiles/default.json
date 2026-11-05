@@ -1,6 +1,6 @@
 {
   "name": "default",
-  "description": "Framework-independent keyword heuristics. Always applied last; write a specific profile when scan shows wrong roles.",
+  "description": "Framework-independent keyword heuristics. Always applied last; write a specific profile when scan shows wrong roles. MCP tools only act when their server or name is robot-specific; agent-coordination tools are auxiliary.",
   "rules": [
     {
       "label": "view_image",
@@ -11,7 +11,12 @@
       "label": "codex_builtin",
       "role": "aux",
       "kind": "builtin",
-      "tool": "^(apply_patch|update_plan|web_search|tool_search|read_file|list_dir|grep_files|list_mcp_resources|list_mcp_resource_templates|read_mcp_resource|spawn_agent|send_input|wait|close_agent|resume_agent|request_user_input|js_repl|view_file)$"
+      "tool": "^(apply_patch|update_plan|web_search|tool_search|read_file|list_dir|grep_files|list_mcp_resources|list_mcp_resource_templates|read_mcp_resource|spawn_agent|send_input|send_message|wait|wait_agent|close_agent|resume_agent|list_agents|request_user_input|js_repl|view_file)$"
+    },
+    {
+      "label": "agent_tools",
+      "role": "aux",
+      "tool": "(?i)^(?:multi_agents?\\w*|collaboration|agents?|subagents?|codex\\w*|mcp__codex\\w*)(?:\\.|__)"
     },
     {
       "label": "mcp_observe",
@@ -20,10 +25,22 @@
       "tool": "(?i)(screenshot|camera|capture|observ|get_obs|get_state|snapshot|image|perceiv|sense|look|render|frame|rgb|depth|pointcloud|lidar|joint_states|pose_get|get_pose)"
     },
     {
+      "label": "robot_server_act",
+      "role": "act",
+      "kind": "mcp",
+      "tool": "(?i)^(?:mcp__)?(?:[a-z0-9]+[_-])*(?:robots?|robo|robotics|arms?|ros2?|sim|simulator|simulation|isaac\\w*|mujoco|gazebo|gripper|manipulator|franka|xarm|piper|aloha|lerobot|unitree|panda)(?:[_-][a-z0-9]+)*(?:\\.|__)(?:[a-z0-9]+_)*(?:act|action|step|exec|execute|run|command|cmd|control|send|publish|reset|home|open|close|release|stop|move|grip|gripper|grasp|place|pour|pick|push|pull|lift|lower|rotate|turn|reach|go|goto|navigate|drive|servo|teleop|trajectory|joints?|set|apply|perform|finish|done|submit)(?:_[a-z0-9]+)*$"
+    },
+    {
+      "label": "robot_server_other",
+      "role": "observe",
+      "kind": "mcp",
+      "tool": "(?i)^(?:mcp__)?(?:[a-z0-9]+[_-])*(?:robots?|robo|robotics|arms?|ros2?|sim|simulator|simulation|isaac\\w*|mujoco|gazebo|gripper|manipulator|franka|xarm|piper|aloha|lerobot|unitree|panda)(?:[_-][a-z0-9]+)*(?:\\.|__)"
+    },
+    {
       "label": "mcp_act",
       "role": "act",
       "kind": "mcp",
-      "tool": "(?i)(move|step|act|exec|grip|grasp|place|pour|pick|joint|arm|robot|control|servo|teleop|command|drive|rotate|push|pull|lift|go_?to|reach|release|open|close|home|reset|navigate|publish|send)"
+      "tool": "(?i)(?:^|\\.|__)(?:[a-z0-9]+_)*(?:gripper|grasp|joints?|arms?|robot|servo|teleop|tcp|end_effector|manipulator|pick_and_place)(?:_[a-z0-9]+)*$"
     },
     {
       "label": "act_code",

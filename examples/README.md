@@ -7,12 +7,17 @@ input/codex_home/sessions/…/rollout-2026-01-15T09-00-00-….jsonl   cell-queue
 input/codex_home/sessions/…/rollout-2026-01-16T14-00-00-….jsonl   MCP robot tools + an SDK script, transcript only
 input/workspace/runs/demo_000/                                     the run directory of the first session
 output/                                                            rct.py export of both rollouts
+sft/                                                               rct.py sft output: one training sample per step
 ```
 
 Start with the readable reports:
 
 - [output/episodes/2026-01-15_0199c0de_00/episode.md](output/episodes/2026-01-15_0199c0de_00/episode.md)
 - [output/episodes/2026-01-16_0199c0de_00/episode.md](output/episodes/2026-01-16_0199c0de_00/episode.md)
+
+[sft/train.jsonl](sft/train.jsonl) holds the same 11 steps as training samples (LLaMA-Factory sharegpt layout,
+registered in [sft/dataset_info.json](sft/dataset_info.json)); [sft/sft_manifest.json](sft/sft_manifest.json)
+lists the options and counts.
 
 The first session was recorded under `/workspace/demo`; the export finds its run directory through
 `--remap-path /workspace/demo=input/workspace`. Regenerate inputs and outputs with:

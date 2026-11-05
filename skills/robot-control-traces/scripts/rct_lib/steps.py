@@ -348,4 +348,17 @@ def annotate_actions(steps, profile, persistent_namespace=False):
                     calls.append({"func": shell.signature(shlex.join(argv)), "args": [], "kwargs": params})
         action["calls"] = calls
         action["adjustments"] = tracker.step(step["step_index"], calls)
+        step["flags"]["control"] = control_evidence(action)
     return steps
+
+
+ROBOT_SPECIFIC_DEFAULT_RULES = {"default:robot_server_act", "default:mcp_act", "default:act_command"}
+
+
+def control_evidence(action):
+    """True when the act step demonstrably commands a robot: matched by a framework profile, by a robot-specific
+    default rule, or by the generic code rule with at least one extracted control call."""
+    rule = action.get("rule") or ""
+    if not rule.startswith("default:") or rule in ROBOT_SPECIFIC_DEFAULT_RULES:
+        return True
+    return rule == "default:act_code" and bool(action["calls"])

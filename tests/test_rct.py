@@ -10,8 +10,9 @@ import unittest
 
 from fixtures import RolloutBuilder, SessionBuilder, T0, png
 
-from rct_lib import calls, codex, shell
+from rct_lib import audit, calls, codex, shell
 from rct_lib import export as export_mod
+from rct_lib import sft as sft_mod
 from rct_lib.redact import Redactor
 from rct_lib.steps import FileState, apply_update, clip
 from rct_lib.validate import validate
@@ -154,6 +155,25 @@ class CleanupTests(unittest.TestCase):
         self.assertNotIn("sk-abc", text)
         self.assertNotIn("bob", text)
 
+    def test_paths_next_to_cjk_volumes_and_private_ips(self):
+        text = Redactor(True).text("代码放在/home/carol/data，清单：/Volumes/backup1t/notes/Q.md，"
+                                   "打开http://172.20.31.7/或 10.0.0.5:8080，版本 10.0.0")
+        for leaked in ("carol", "backup1t", "172.20.31.7", "10.0.0.5"):
+            self.assertNotIn(leaked, text)
+        self.assertIn("代码放在~/data", text)
+        self.assertIn("版本 10.0.0", text, "three-part version numbers are not addresses")
+
+    def test_settings_and_placeholders_are_not_secrets(self):
+        r = Redactor(True)
+        kept = ("judge 默认 `max_tokens=4096`，", "num_tokens: 128000", "export ZAI_API_KEY=...", "API_KEY=$ZAI_KEY",
+                "client(api_key=args.api_key)", "token = os.environ.get(", "PASSWORD=<your password>")
+        for text in kept:
+            self.assertEqual(r.text(text), text)
+        self.assertEqual(r.text("`ZAI_API_KEY=3f2a9c1d.Xy7Qk2`"), "`ZAI_API_KEY=<redacted>`")
+        self.assertEqual(r.obj({"api_key": "3f2a9c1d.Xy7Qk2", "max_tokens": "4096", "token": "$T", "Secrets": "use env"}),
+                         {"api_key": "<redacted>", "max_tokens": "4096", "token": "$T", "Secrets": "use env"})
+        self.assertEqual(r.counts, {"assignment": 1, "secret_field": 1})
+
     def test_progress_output(self):
         self.assertEqual(clip("step 1/9\rstep 2/9\rstep 9/9\ndone", 0), "step 9/9\ndone")
         raw = json.dumps({"stdout": "\x1b[92mstep 1\x1b[0m\rstep 2\nok"})
@@ -226,6 +246,108 @@ class GenericExportTests(unittest.TestCase):
             (steps,) = steps_of(Path(tmp) / "out")
         self.assertEqual(errors, [])
         self.assertEqual(steps[1]["action"]["adjustments"][0]["changes"]["--angle"]["delta"], 2.0)
+
+
+class ControlEvidenceTests(unittest.TestCase):
+    """Failure modes seen in a published dataset built with this exporter."""
+
+    def test_agent_infrastructure_is_not_robot_control(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().context().user("我们先复现 cycle vla？")
+            b.reasoning("先查本地是否已有 CycleVLA 相关代码")
+            b.mcp("send_message", {"target": "worker", "message": "list the repo"}, "sent", namespace="collaboration")
+            b.mcp("close_agent", {"id": "w1"}, '{"previous_status": {"completed": "结论：..."}}',
+                  namespace="multi_agent_v1")
+            b.mcp("open_in_codex", {"path": "/Volumes/backup1t/x.pptx"}, "opened", namespace="mcp__codex_app")
+            b.mcp("create_pull_request", {"title": "fix"}, "ok", namespace="mcp__github")
+            b.mcp("move_file", {"src": "a", "dst": "b"}, "ok", namespace="mcp__filesystem")
+            b.shell("python eval_policy.py --config cfg.yaml", "success rate 0.4")
+            path = b.write(Path(tmp) / "r.jsonl")
+            manifest = export_mod.export([path], Path(tmp) / "out", export_mod.Options(), log=lambda *_: None)
+        self.assertEqual(manifest["episodes"], [])
+        self.assertIn("act steps", manifest["sources"][0]["skipped"])
+
+    def test_robot_mcp_server(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().context().user("把两个碗叠起来")
+            b.mcp("task_demos", {"query": "stack bowls"}, "没有匹配的任务。", namespace="mcp__robot")
+            b.mcp("observe", {}, "fingertips L (210, 300)", image=png((5, 5, 5)), namespace="mcp__robot")
+            b.mcp("send_message", {"target": "critic", "message": "check"}, "sent", namespace="collaboration")
+            b.reasoning("the small bowl rim is at (320, 240)")
+            b.mcp("execute_skill", {"left": {"skill": "grasp", "object": "bowl", "target_point": [320, 240]},
+                                    "seconds": 8, "reason": "grasp the rim"}, "termination: done",
+                  namespace="mcp__robot")
+            b.mcp("zoom_head", {"u": 320, "v": 240}, "zoomed", image=png((6, 6, 6)), namespace="mcp__robot")
+            b.mcp("execute_skill", {"left": {"skill": "grasp", "object": "bowl", "target_point": [326, 240]},
+                                    "seconds": 8, "reason": "rim is 6 px further right"}, "termination: done",
+                  namespace="mcp__robot")
+            path = b.write(Path(tmp) / "r.jsonl")
+            errors, _ = export([path], Path(tmp) / "out")
+            (steps,) = steps_of(Path(tmp) / "out")
+        self.assertEqual(errors, [])
+        self.assertEqual([s["action"]["signature"] for s in steps], ["mcp__robot.execute_skill"] * 2)
+        first, second = steps
+        self.assertEqual([r["signature"] for r in first["observation"]["reads"]],
+                         ["mcp__robot.task_demos", "mcp__robot.observe"])
+        self.assertEqual(first["action"]["calls"][0]["kwargs"]["left.target_point"], [320, 240])
+        self.assertEqual(second["observation"]["reads"][0]["signature"], "mcp__robot.zoom_head")
+        self.assertEqual(second["action"]["adjustments"][0]["changes"]["left.target_point"]["delta"], [6, 0])
+        self.assertTrue(first["flags"]["control"])
+
+
+class SftTests(unittest.TestCase):
+    def build(self, tmp, **kw):
+        path = GenericExportTests.build(None, tmp)
+        export([path], Path(tmp) / "out")
+        manifest = sft_mod.build(Path(tmp) / "out", Path(tmp) / "sft", sft_mod.SftOptions(**kw))
+        rows = [json.loads(l) for l in (Path(tmp) / "sft" / "train.jsonl").read_text().splitlines()]
+        return manifest, rows, sft_mod.check(Path(tmp) / "sft")
+
+    def test_step_samples(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest, rows, errors = self.build(tmp)
+            info = json.loads((Path(tmp) / "sft" / "dataset_info.json").read_text())
+        self.assertEqual(errors, [])
+        self.assertEqual(manifest["counts"]["samples"], 4)
+        self.assertEqual(info["robot_control_sft"]["columns"], {"messages": "messages", "images": "images"})
+        first, second, third, fourth = rows
+        prompt, target = first["messages"][1]["content"], first["messages"][2]["content"]
+        self.assertEqual((prompt.count("<image>"), len(first["images"])), (1, 1))
+        self.assertTrue(target.startswith("cup at right front; approach from behind"))
+        self.assertIn("robo.move_to(GRIP + [0, 0, 0.06]", target)
+        self.assertNotIn("sk-abcdefghijklmnop", prompt)
+        prompt, target = second["messages"][1]["content"], second["messages"][2]["content"]
+        self.assertIn("File `/tmp/cell.py`", target, "code written by an earlier patch is part of the target")
+        self.assertIn("-0.455", target)
+        self.assertEqual(prompt.count("moved"), 2, "previous result once in the summary, once in full")
+        self.assertTrue(second["meta"]["action_failed"])
+        self.assertIn('"reason": "clear the mug"', third["messages"][2]["content"])
+        self.assertIn("Traceback: blocked", third["messages"][1]["content"])
+        self.assertEqual(len(fourth["images"]), 1)
+        self.assertTrue(all(r["meta"]["control"] for r in rows))
+
+    def test_filters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest, rows, errors = self.build(tmp, drop_failed=True)
+        self.assertEqual(errors, [])
+        self.assertEqual([r["meta"]["step_index"] for r in rows], [0, 2, 3])
+        self.assertIn("→ failed", rows[1]["messages"][1]["content"], "failed steps stay in the history")
+        self.assertEqual(manifest["skipped_steps"], {"action_failed": 1})
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest, rows, _ = self.build(tmp, success_only=True)
+        self.assertEqual((rows, manifest["skipped_steps"]), ([], {"episode_not_successful": 4}))
+
+    def test_audit_third_party_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sft.jsonl"
+            path.write_text(json.dumps({"text": "代码放在/home/carol/data, /Volumes/backup1t/a.md, http://172.20.31.7/",
+                                        "ok": "~/data <redacted:openai_key> /Volumes/<volume>/a TOKEN=<redacted>",
+                                        "doc": "```bash\nexport ZAI_API_KEY=...\n```\n", "max_tokens": "16384",
+                                        "api_key": "3f2a9c1d.Xy7Qk2"}, ensure_ascii=False) + "\n")
+            found = audit.scan([tmp])
+        self.assertEqual(sorted(found), ["home_path", "private_ip", "secret_field", "volume_path"])
+        self.assertEqual(found["volume_path"]["count"], 1, "already redacted text is not reported again")
+        self.assertNotIn("carol", json.dumps(found), "findings are masked")
 
 
 class CellQueueAdapterTests(unittest.TestCase):
@@ -352,9 +474,14 @@ class ExampleTests(unittest.TestCase):
             errors, totals, _ = validate(Path(tmp) / "output")
             fresh = self.summary(Path(tmp) / "output")
             markdown = [p.name for p in (Path(tmp) / "output" / "episodes").glob("*/episode.md")]
+            sft_errors = sft_mod.check(Path(tmp) / "sft")
+            fresh_sft = (Path(tmp) / "sft" / "train.jsonl").read_text()
         self.assertEqual(errors, [])
+        self.assertEqual(totals["privacy"], {})
         self.assertEqual(len(markdown), 2)
         self.assertEqual(fresh, self.summary(examples / "output"), "run python3 examples/make_examples.py")
+        self.assertEqual(sft_errors, [])
+        self.assertEqual(fresh_sft, (examples / "sft" / "train.jsonl").read_text(), "run python3 examples/make_examples.py")
 
 
 if __name__ == "__main__":

@@ -125,10 +125,12 @@ class RolloutBuilder:
                 {"type": "input_image", "image_url": data_url(data)}]})
         return cid
 
-    def mcp(self, name, args, output="ok", image=None):
+    def mcp(self, name, args, output="ok", image=None, namespace=None):
         cid = self.call_id()
-        self._line("response_item", {"type": "function_call", "name": name, "arguments": json.dumps(args),
-                                     "call_id": cid})
+        item = {"type": "function_call", "name": name, "arguments": json.dumps(args), "call_id": cid}
+        if namespace:
+            item["namespace"] = namespace
+        self._line("response_item", item)
         items = [{"type": "input_text", "text": output}]
         if image is not None:
             items.append({"type": "input_image", "image_url": data_url(image)})

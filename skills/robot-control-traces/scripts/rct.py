@@ -5,7 +5,9 @@
   rct.py scan --detail ROLLOUT                    every command/tool signature in one rollout and its role
   rct.py export --auto --out DIR                  export every rollout found by scan
   rct.py export --rollout R1 R2 --out DIR         export specific rollouts
-  rct.py validate DIR                             schema check, coverage and a redacted sample
+  rct.py validate DIR                             schema check, coverage, privacy scan and a redacted sample
+  rct.py sft DIR --out SFT_DIR                    step-level training samples (LLaMA-Factory sharegpt layout)
+  rct.py audit PATH...                            privacy scan of any dataset files, including third-party ones
   rct.py profiles                                 list built-in profiles
 
 Python 3.9+, standard library only. Reads $CODEX_HOME (default ~/.codex); never reads auth.json.
@@ -19,7 +21,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from rct_lib import codex, export as export_mod, profile as profile_mod, steps as steps_mod  # noqa: E402
+from rct_lib import audit, codex, export as export_mod, profile as profile_mod, sft as sft_mod  # noqa: E402
+from rct_lib import steps as steps_mod  # noqa: E402
 from rct_lib.redact import Redactor  # noqa: E402
 from rct_lib.validate import format_report, validate  # noqa: E402
 
@@ -114,6 +117,7 @@ def cmd_export(args):
                                  images=args.images, redact=not args.no_redact, path_map=tuple(pairs["--redact-path"]),
                                  max_chars=args.max_chars, use_adapters=not args.no_adapters,
                                  read_local_files=args.read_local_files, min_act_steps=args.min_act_steps,
+                                 min_control_steps=args.min_control_steps,
                                  remap_paths=tuple(pairs["--remap-path"]))
     manifest = export_mod.export(paths, args.out, options, overwrite=args.overwrite)
     print(f"wrote {len(manifest['episodes'])} episode(s) from {len(paths)} rollout(s) to {args.out}")
@@ -126,6 +130,28 @@ def cmd_validate(args):
     errors, totals, samples = validate(args.out)
     print(format_report(errors, totals, samples))
     return 1 if errors else 0
+
+
+def cmd_sft(args):
+    options = sft_mod.SftOptions(history=args.history, max_images=args.max_images, read_chars=args.read_chars,
+                                 success_only=args.success_only, drop_failed=args.drop_failed,
+                                 control_only=not args.keep_no_control, redact=not args.no_redact)
+    manifest = sft_mod.build(args.export, args.out, options, overwrite=args.overwrite)
+    counts = manifest["counts"]
+    print(f"wrote {counts.get('samples', 0)} sample(s) from {counts.get('episodes', 0)} episode(s) to {args.out} "
+          f"({counts.get('images', 0)} image slots, {manifest['image_files']} image files); "
+          f"skipped steps {manifest['skipped_steps'] or 'none'}")
+    errors = sft_mod.check(args.out)
+    print(audit.format_findings(audit.scan([args.out])))
+    for error in errors[:20]:
+        print(f"  {error}")
+    return 1 if errors else 0
+
+
+def cmd_audit(args):
+    found = audit.scan(args.paths)
+    print(audit.format_findings(found))
+    return 1 if found else 0
 
 
 def cmd_profiles(_args):
@@ -177,11 +203,31 @@ def main(argv=None):
     exp.add_argument("--read-local-files", action="store_true",
                      help="read code files the transcript does not contain from disk (current contents)")
     exp.add_argument("--min-act-steps", type=int, default=1, help="skip rollouts with fewer act steps")
+    exp.add_argument("--min-control-steps", type=int, default=1,
+                     help="skip rollouts with fewer act steps that show robot-control evidence (0 disables)")
     exp.set_defaults(func=cmd_export)
 
     val = sub.add_parser("validate", help="check an export")
     val.add_argument("out", type=Path)
     val.set_defaults(func=cmd_validate)
+
+    sft = sub.add_parser("sft", help="turn an export into step-level training samples (LLaMA-Factory layout)")
+    common(sft)
+    sft.add_argument("export", type=Path, help="directory written by export")
+    sft.add_argument("--out", required=True, type=Path)
+    sft.add_argument("--overwrite", action="store_true")
+    sft.add_argument("--history", type=int, default=4, help="earlier steps summarised in each prompt")
+    sft.add_argument("--max-images", type=int, default=4, help="most recent observation images per sample")
+    sft.add_argument("--read-chars", type=int, default=1500, help="clip each observation read / previous result")
+    sft.add_argument("--success-only", action="store_true", help="only episodes recorded as successful")
+    sft.add_argument("--drop-failed", action="store_true", help="do not use failed actions as targets")
+    sft.add_argument("--keep-no-control", action="store_true",
+                     help="also use act steps without robot-control evidence as targets")
+    sft.set_defaults(func=cmd_sft)
+
+    aud = sub.add_parser("audit", help="privacy scan of any dataset files (exports, sft output, third-party data)")
+    aud.add_argument("paths", nargs="+", type=Path)
+    aud.set_defaults(func=cmd_audit)
 
     prof = sub.add_parser("profiles", help="list built-in profiles")
     prof.set_defaults(func=cmd_profiles)

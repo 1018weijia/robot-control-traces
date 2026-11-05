@@ -14,7 +14,7 @@ from . import adapters, profile as profile_mod, report as report_mod, steps as s
 from .codex import read_rollout
 from .redact import Redactor
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 MANIFEST_SCHEMA = "robot-control-trace-manifest/v1"
 PRIVATE_KEYS = ("_act", "_observe", "_results", "_episode_hint")
 EXTENSIONS = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
@@ -31,6 +31,7 @@ class Options:
     use_adapters: bool = True
     read_local_files: bool = False
     min_act_steps: int = 1
+    min_control_steps: int = 1      # act steps with flags.control; 0 keeps rollouts without robot evidence
     remap_paths: tuple = ()         # (recorded, local) prefixes for run directories that moved since recording
 
 
@@ -224,6 +225,7 @@ def coverage(group):
         "with_calls": share(lambda s: s["action"]["calls"]),
         "with_adjustments": share(lambda s: s["action"]["adjustments"]),
         "enriched": share(lambda s: s["enrichment"]),
+        "control_steps": sum(1 for s in group if s["flags"].get("control")),
         "human_input_steps": sum(1 for s in group if s["flags"]["human_input"]),
         "failed_actions": sum(1 for s in group if s["flags"]["action_failed"]),
     }
@@ -253,8 +255,14 @@ def export(paths, out, options: Options, overwrite=False, log=print):
             log(f"skip {path.name}: {type(exc).__name__}: {exc}")
             continue
         acts = sum(len(g) for _, g in episodes)
+        control = sum(1 for _, g in episodes for s in g if s["flags"].get("control"))
         if acts < options.min_act_steps:
             writer.skip(path, f"{acts} act steps (< {options.min_act_steps})", rollout)
+            continue
+        if control < options.min_control_steps:
+            writer.skip(path, f"no robot-control evidence: {control} of {acts} act steps "
+                              f"(< {options.min_control_steps}); see scan --detail", rollout)
+            log(f"skip {path.name}: {acts} act steps but {control} with robot-control evidence")
             continue
         writer.write_rollout(path, rollout, profile, episodes, final, report)
         log(f"{path.name}: {len(episodes)} episode(s), {acts} steps, profiles {', '.join(profile.names)}")

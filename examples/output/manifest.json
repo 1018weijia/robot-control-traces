@@ -2,9 +2,9 @@
   "schema": "robot-control-trace-manifest/v1",
   "generator": {
     "name": "robot-control-traces",
-    "version": "0.2.0"
+    "version": "0.3.0"
   },
-  "created_at": "2026-11-05T04:48:05+00:00",
+  "created_at": "2026-11-05T08:20:10+00:00",
   "options": {
     "profiles": [],
     "auto_profiles": true,
@@ -14,6 +14,7 @@
     "use_adapters": true,
     "read_local_files": false,
     "min_act_steps": 1,
+    "min_control_steps": 1,
     "remapped_paths": 1
   },
   "sources": [

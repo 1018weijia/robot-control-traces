@@ -50,6 +50,29 @@ When several profiles apply, list fields are merged, `action_calls` / `probe_cal
 `write_stdin` calls that continue a running command are handled without rules: they deliver results of an `act`
 and are ignored otherwise.
 
+## The default profile and control evidence
+
+`default` is a fallback for frameworks without a profile. Its rules, in order:
+
+| label | role | matches |
+|-------|------|---------|
+| `view_image` | observe | Codex `view_image` |
+| `codex_builtin` | aux | Codex tools such as `apply_patch`, `update_plan`, `send_message`, `wait_agent` |
+| `agent_tools` | aux | sub-agent and Codex app servers: `collaboration.*`, `multi_agent*.*`, `mcp__codex*` |
+| `mcp_observe` | observe | MCP camera, image, screenshot, state and observation tools |
+| `robot_server_act` | act | a tool of a server named like a robot or simulator (`robot`, `arm`, `ros2`, `isaac_sim`, `mujoco`, `xarm`, `lerobot`, …) whose name contains a control verb (`execute`, `move`, `grasp`, `step`, `set`, `publish`, `finish`, …) |
+| `robot_server_other` | observe | the remaining tools of such a server (`task_demos`, `zoom_head`) |
+| `mcp_act` | act | other MCP tools whose name ends in robot vocabulary (`set_gripper`, `move_joints`, `pick_and_place`) |
+| `act_code`, `act_command` | act | Python calling `robot.move…` / `env.step` and similar; ROS publish / service / action commands |
+| `observe_code`, `observe_command` | observe | Python or commands reading observations, state, cameras, images |
+
+A step's `flags.control` is true when the rule that made it an act comes from a non-default profile, or is
+`robot_server_act`, `mcp_act` or `act_command`, or is `act_code` with extracted `action.calls`. Export skips rollouts
+with fewer than `--min-control-steps` (default 1) such steps, so coding, research and agent-orchestration sessions
+that only look like control to keyword rules stay out of the dataset. `rct.py sft` also leaves out act steps
+without the flag unless `--keep-no-control`. If a real robot framework is skipped, write a profile for it: any
+explicit profile rule counts as control evidence.
+
 ## Developing a profile
 
 1. `rct.py scan --detail ROLLOUT` and note the signatures that should be `act` / `observe`.

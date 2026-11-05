@@ -1,0 +1,30 @@
+{
+  "schema": "robot-control-sft/v1",
+  "created_at": "2026-11-05T08:20:11+00:00",
+  "source": {
+    "generator": {
+      "name": "robot-control-traces",
+      "version": "0.3.0"
+    },
+    "episodes": 2
+  },
+  "options": {
+    "history": 4,
+    "max_images": 4,
+    "read_chars": 1500,
+    "task_chars": 4000,
+    "success_only": false,
+    "drop_failed": false,
+    "control_only": true,
+    "redact": true
+  },
+  "counts": {
+    "episodes": 2,
+    "samples": 11,
+    "images": 11,
+    "with_analysis": 11
+  },
+  "skipped_steps": {},
+  "image_files": 11,
+  "redaction": {}
+}

@@ -4,6 +4,7 @@
 input/codex_home/   two Codex rollouts (fictional robot sessions, written in the current rollout format)
 input/workspace/    the run directory one of them drove (cell-queue session: commands, responses, observations)
 output/             what `rct.py export` produces from them
+sft/                what `rct.py sft output` turns that export into (step-level training samples)
 
 Everything is generated here; no real conversation, robot or person is involved.
 """
@@ -361,14 +362,19 @@ def main():
     parser.add_argument("--out", type=Path, default=HERE, help="directory for input/ and output/ (default: examples/)")
     args = parser.parse_args()
     base = args.out.resolve()
-    for name in ("input", "output"):
+    for name in ("input", "output", "sft"):
         shutil.rmtree(base / name, ignore_errors=True)
     demo_cell_queue(base)
     demo_mcp(base)
-    command = [sys.executable, str(RCT), "--codex-home", "input/codex_home", "export", "--auto", "--out", "output",
-               "--images", "all", "--remap-path", f"{RECORDED}=input/workspace"]
-    print("$ (cd", base, "&&", " ".join(command[1:]).replace(str(RCT), "rct.py") + ")", flush=True)
-    return subprocess.call(command, cwd=base)
+    commands = [[sys.executable, str(RCT), "--codex-home", "input/codex_home", "export", "--auto", "--out", "output",
+                 "--images", "all", "--remap-path", f"{RECORDED}=input/workspace"],
+                [sys.executable, str(RCT), "sft", "output", "--out", "sft"]]
+    for command in commands:
+        print("$ (cd", base, "&&", " ".join(command[1:]).replace(str(RCT), "rct.py") + ")", flush=True)
+        code = subprocess.call(command, cwd=base)
+        if code:
+            return code
+    return 0
 
 
 if __name__ == "__main__":

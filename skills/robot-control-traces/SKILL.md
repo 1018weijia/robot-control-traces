@@ -1,6 +1,6 @@
 ---
 name: robot-control-traces
-description: Converts Codex conversation logs (rollout JSONL under ~/.codex/sessions) of AI-driven robot, simulator or embodied-agent control into a step-level dataset of observation, analysis, action (calls and parameter adjustments) and outcome, including the camera images the model saw. Works for any control framework through JSON profiles; file-queue (cell-queue) sessions also get ground truth from their run directories. Use when the user wants to collect, export, organize, clean or share robot control sessions, agent control traces, interaction or action logs, or Codex chat history as training or evaluation data.
+description: Converts Codex conversation logs (rollout JSONL under ~/.codex/sessions) of AI-driven robot, simulator or embodied-agent control into a step-level dataset of observation, analysis, action (calls and parameter adjustments) and outcome, including the camera images the model saw, and step-level SFT samples from it. Works for any control framework through JSON profiles; file-queue (cell-queue) sessions also get ground truth from their run directories. Use when the user wants to collect, export, organize, clean or share robot control sessions, agent control traces, interaction or action logs, or Codex chat history as training or evaluation data.
 ---
 
 # Robot control traces
@@ -30,6 +30,12 @@ against the previous step with the same call. The outcome holds output, exit cod
 Roles come from profiles: explicit `--profile`, then auto-detected built-ins (`cell-queue`), then `default`
 keyword heuristics. Unmatched calls are `aux`.
 
+An act step has `flags.control` when it is evidence of robot control: matched by a non-default profile, by a robot
+MCP server / ROS / robot CLI rule, or code with extracted control calls. Generic `default` matches (an MCP tool
+named `move_file`, a research script) are acts without that flag, and rollouts with no control step are skipped.
+Sub-agent and Codex app tools (`collaboration.*`, `multi_agent*.*`, `mcp__codex*`) are `aux` unless a profile says
+otherwise.
+
 ## Workflow
 
 Copy this checklist and track progress:
@@ -40,7 +46,8 @@ Copy this checklist and track progress:
 - [ ] 3. if roles are wrong: write a profile, re-check with --profile
 - [ ] 4. export
 - [ ] 5. validate and spot-check 2-3 steps
-- [ ] 6. report to the user
+- [ ] 6. if training data is wanted: sft
+- [ ] 7. report to the user
 ```
 
 Below, `RCT` is `python3 <this skill directory>/scripts/rct.py`.
@@ -54,6 +61,8 @@ that assigned it and an example. Judge it against what the agent was doing:
 - the calls that move the robot or send commands must be `act`; camera/state reads should be `observe`;
 - `act 0` means the framework is unknown: write a profile;
 - file edits, builds or log reads marked `act` mean the default heuristics are too broad: override them;
+- rollouts listed by scan but skipped by export with "no robot-control evidence" are usually not robot sessions
+  (coding, research, agent orchestration); if one is, write a profile for its control calls;
 - if the agent runs control code from files, check that `code_file_options` covers the option naming the file.
 
 **3. Write a profile** when needed, as a JSON file in the user's project (format and examples in
@@ -81,10 +90,12 @@ Useful options: `--images seen|all|none` (default `seen`: images the model recei
 run-directory frames), `--redact-path /data/acme=<data>`, `--max-chars 4000` (output clip), `--no-adapters`,
 `--read-local-files` (read code files missing from the transcript from disk; their current content may differ),
 `--remap-path RECORDED=LOCAL` (run directories copied or moved since the session), `--min-act-steps N`,
-`--overwrite` (only replaces a previous export).
+`--min-control-steps N` (default 1; 0 keeps rollouts without control evidence), `--overwrite` (only replaces a
+previous export).
 
 **5. Validate.** Export runs validation automatically; `RCT validate traces/` re-runs it. It checks the schema,
-step order, adjustment references and image hashes, then prints coverage and sample steps. Then open the
+step order, adjustment references and image hashes, runs a privacy scan, then prints coverage and sample steps. Then
+open the
 `episode.md` of 1-2 episodes (or read steps in `steps.jsonl`) and confirm:
 
 - `analysis` contains the reasoning that led to the action and `observation.images` the frames it was based on;
@@ -95,14 +106,25 @@ Low `with_images` usually means the model rarely viewed images; low `with_code` 
 transcript never showed (try `--read-local-files`); `enriched 0%` for a cell-queue run means the run directory was
 not found (moved: use `--remap-path`).
 
-**6. Report** the output path, episode and step counts, coverage, profile used and anything that stayed unmatched.
+**6. SFT samples.** `RCT sft traces/ --out sft/` writes `train.jsonl` with one sample per control step (prompt:
+task, short history, previous result, current images and reads; target: analysis then the exact command or code),
+plus `dataset_info.json` for LLaMA-Factory and `sft_manifest.json`. Options: `--history N`, `--max-images N`,
+`--drop-failed`, `--success-only` (needs adapter success labels), `--keep-no-control`. It checks that every
+`<image>` placeholder has a file and runs the privacy scan. Do not train on whole episodes as single samples:
+long sessions hold hundreds of images and far exceed usual cutoffs.
+
+**7. Report** the output path, episode and step counts, coverage, profile used, rollouts skipped and why, and
+anything that stayed unmatched.
 
 ## Privacy rules
 
 - Never read, copy or print `auth.json` or other credentials in `$CODEX_HOME`. The script only reads
   `sessions/` and `archived_sessions/`.
-- Keep redaction on (default): home paths become `~`, emails `<email>`, API keys / tokens / passwords
-  `<redacted>` (or `<redacted:kind>`). Add `--redact-path OLD=NEW` for project or customer names. `--no-redact` is for private use only.
+- Keep redaction on (default): home paths become `~`, external volume names `/Volumes/<volume>`, private IPv4
+  addresses `<private-ip>`, emails `<email>`, API keys / tokens / passwords `<redacted>` (or `<redacted:kind>`).
+  Add `--redact-path OLD=NEW` for project or customer names. `--no-redact` is for private use only.
+- Before sharing any dataset, including one produced by another converter, run `RCT audit <dir or files>`; it
+  decodes JSON, masks what it prints and exits 1 if findings remain.
 - Images are exported because they are the observations; tell the user to review them before sharing
   (`--images none` drops them).
 - Only export Codex homes the user owns or has consent for. The script is read-only: it never modifies
@@ -125,7 +147,7 @@ directories leave steps transcript-only. Writing a new adapter: [reference/profi
 
 ## Additional resources
 
-- Field-by-field description of `steps.jsonl`, `episode.json`, `timeline.jsonl` and `manifest.json`:
-  [reference/schema.md](reference/schema.md)
+- Field-by-field description of `steps.jsonl`, `episode.json`, `timeline.jsonl`, `manifest.json` and the SFT
+  output: [reference/schema.md](reference/schema.md)
 - Profile format, rule matching, examples for ROS 2 / MCP / SDK scripts, adapters:
   [reference/profiles.md](reference/profiles.md)

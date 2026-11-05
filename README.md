@@ -24,7 +24,8 @@ which calls act and which observe; adapters can add ground truth from run direct
   user request, and the run directory adds native action ranges, primitive calls and the success label;
 - [episode.md of an MCP session](examples/output/episodes/2026-01-16_0199c0de_00/episode.md): `robot__move_arm`
   calls refined from camera frames, then an SDK script, transcript only;
-- `steps.jsonl`, `timeline.jsonl`, `episode.json`, `images/` and `manifest.json` next to them.
+- `steps.jsonl`, `timeline.jsonl`, `episode.json`, `images/` and `manifest.json` next to them;
+- [`sft/train.jsonl`](examples/sft/train.jsonl): the same steps as training samples, one per action.
 
 One step of the first episode, as rendered in `episode.md`:
 
@@ -74,8 +75,14 @@ $RCT export --auto --since 2026-01-01 --out traces/                 # write + va
 $RCT export --rollout a.jsonl --profile my_framework.json --out traces/
 $RCT export --auto --out traces/ --remap-path /old/runs=/data/runs  # run directories moved since recording
 $RCT validate traces/
+$RCT sft traces/ --out sft/                 # one training sample per action (LLaMA-Factory sharegpt layout)
+$RCT audit sft/ some_other_dataset/         # privacy scan of any JSON / JSONL / Markdown / TSV files
 $RCT profiles
 ```
+
+A rollout is exported only if at least one act step carries robot-control evidence (`--min-control-steps`): a call
+matched by a framework profile, a robot MCP server or ROS / robot CLI, or code with recognised control calls. Agent
+infrastructure (sub-agents, Codex app tools), GitHub or file-system MCP tools and research scripts are not control.
 
 Output (`robot-control-trace/v1`):
 
@@ -90,6 +97,22 @@ traces/
     images/          frames the model received, named by content hash
 ```
 
+`sft` writes `robot-control-sft/v1`:
+
+```
+sft/
+  train.jsonl          {"messages": [system, user, assistant], "images": [...], "meta": {...}}
+  dataset_info.json    LLaMA-Factory entry "robot_control_sft" (sharegpt, columns messages / images)
+  sft_manifest.json    options, counts, skipped steps and why, redaction counts
+  images/<episode>/    the observation frames the samples reference
+```
+
+Each sample is one decision: the user turn holds the task, a one-line summary of the last `--history` steps, the
+result of the previous action and the current observation (`<image>` placeholders, state reads, user messages);
+the assistant turn is the recorded analysis followed by the exact command or code. Long episodes therefore stay
+within normal context lengths instead of becoming one sample of hundreds of images. Failed actions are kept as
+targets by default (their failure is shown in the next prompt); `--drop-failed` and `--success-only` filter them.
+
 Field reference: [skills/robot-control-traces/reference/schema.md](skills/robot-control-traces/reference/schema.md).
 Profiles for other frameworks (ROS 2, MCP servers, SDK scripts) and writing adapters:
 [skills/robot-control-traces/reference/profiles.md](skills/robot-control-traces/reference/profiles.md).
@@ -98,8 +121,11 @@ Profiles for other frameworks (ROS 2, MCP servers, SDK scripts) and writing adap
 
 - Only `sessions/` and `archived_sessions/` are read; `auth.json` and config are never touched. Rollouts and run
   directories are never modified.
-- Redaction is on by default: home directories become `~`, emails and API keys / tokens / passwords are replaced,
-  system prompts and git remotes are not exported. Add `--redact-path OLD=NEW` for project or customer names.
+- Redaction is on by default: home directories become `~`, external volume names `/Volumes/<volume>`, private
+  IPv4 addresses `<private-ip>`, emails and API keys / tokens / passwords are replaced, system prompts and git
+  remotes are not exported. Add `--redact-path OLD=NEW` for project or customer names.
+- `validate` and `sft` include a privacy scan; `rct.py audit PATH...` runs it on any dataset, including ones
+  converted by other tools, and exits non-zero when something the redaction rules would change remains.
 - Images are part of the data. Review them (`episode.md` shows them inline) before publishing, or export with
   `--images none`.
 
@@ -120,7 +146,10 @@ output is current. No Codex installation is needed.
 `episode.md`，可以直接阅读和复核。完整示例（输入和产物）见 `examples/`。任何控制框架都可以用：运行
 `rct.py scan --detail` 查看每类调用被判成什么角色，判错了就写一个 JSON profile（见 `reference/profiles.md`）。
 文件队列式（cell-queue）会话会自动和运行目录对齐，补充原生动作区间、primitive 调用、观测状态和成功标签。
-默认开启脱敏，从不读取 `auth.json`。
+只有含机器人控制证据的 rollout 才会导出，子 agent、GitHub、文件系统等工具调用不算控制。
+`rct.py sft` 把导出结果转成按步的训练样本（每个动作一条，LLaMA-Factory sharegpt 格式，带 `<image>` 占位），
+`rct.py audit` 可以对任意数据集（包括别的工具转换的）做隐私扫描。默认开启脱敏（home 路径、外接卷名、内网 IP、
+邮箱、密钥），从不读取 `auth.json`。
 
 ## License
 

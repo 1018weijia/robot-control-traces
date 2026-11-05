@@ -30,6 +30,7 @@ rollout. Timestamps are ISO 8601 UTC strings from the rollout. All text is redac
 | `context.notes` | context compaction or aborted turns that happened inside the step |
 | `flags.human_input` | a user message arrived since the previous act (correction or new instruction) |
 | `flags.action_failed` | exit code was non-zero |
+| `flags.control` | the act is evidence of robot control: a non-default profile rule, a robot MCP server / ROS / robot CLI rule, or code with extracted control calls (false for generic `default` matches) |
 | `source` | `call_id` of the act call, `seq_start` / `seq_action` into `timeline.jsonl` |
 | `enrichment.<adapter>` | adapter ground truth (see cell_queue below), `{}` otherwise |
 
@@ -101,7 +102,7 @@ Paths are the recorded ones; `--remap-path` only changes where the exporter look
 - `profile`: `names[]`, `adapters[]`.
 - `stats`: `steps`, `images_seen`, `images_saved`, coverage fractions (`with_images`, `with_observation`,
   `with_reasoning`, `with_analysis_text`, `with_code`, `with_calls`, `with_adjustments`, `enriched`),
-  `human_input_steps`, `failed_actions`.
+  `human_input_steps`, `failed_actions`, `control_steps`.
 - `final`: analysis after the last act (`messages`, `reasoning`, `user_messages`, `observation`); last episode of a
   rollout only.
 - `enrichment.<adapter>`: per-episode adapter data (cell_queue: `session`, `run_config`, `result` with success
@@ -118,8 +119,11 @@ One normalized event per line, null fields dropped: `seq`, `ts`, `turn`, `kind` 
 
 `schema` (`robot-control-trace-manifest/v1`), `generator{name, version}`, `created_at`, `options` (redacted; custom
 redaction and remap paths are only counted), `sources[]` (`rollout_file`, `rollout_sha256`, `lines`, `warnings`, `profiles`, `episodes[]`, or
-`skipped` with the reason), `episodes[]` (`id` = folder name, `steps`, `rollout`),
-`redaction{enabled, counts, custom_paths}`.
+`skipped` with the reason, e.g. too few act steps or no robot-control evidence), `episodes[]` (`id` = folder name,
+`steps`, `rollout`), `redaction{enabled, counts, custom_paths}`. Redaction count kinds: `home_path`, `volume_path`,
+`private_ip`, `email`, `custom_path`, `secret_field` (a JSON field such as `"api_key"`) and one per secret pattern
+(`assignment`, `bearer`, `openai_key`, …). Token counts (`max_tokens`) and placeholders (`$API_KEY`, `...`,
+`args.api_key`) are not treated as secrets.
 
 ## episode.md
 
@@ -127,6 +131,34 @@ The steps of the episode rendered for people: task prompt and result, then per s
 (linked from `images/`), state and reads, reasoning and rationale, the executed code or arguments, control calls,
 adjustments against earlier steps, and the outcome (JSON output shown as `key: value` lines). It is rendered from
 the redacted records, so it is safe to review instead of the JSONL before sharing.
+
+## SFT output (`robot-control-sft/v1`, written by `rct.py sft`)
+
+```
+SFT/
+  train.jsonl          one sample per act step
+  dataset_info.json    LLaMA-Factory dataset entry "robot_control_sft" (sharegpt; columns messages, images)
+  sft_manifest.json    schema, created_at, source, options, counts, skipped_steps, image_files, redaction
+  images/<episode_id>/<file>   observation frames referenced by samples (hard links when possible)
+```
+
+A `train.jsonl` row:
+
+- `id`: `<episode_id>#<step_index>`.
+- `messages`: `[system, user, assistant]`. The user turn holds `Task:`, `Earlier steps:` (one line per step for the
+  last `--history` steps: signature, control calls, why, ok/failed and result), `Result of your last action`,
+  `User:` messages of this span (not repeated when equal to the task), and `Current observation:` with one
+  `<camera or image N>: <image>` line per image (latest `--max-images`), reads and adapter state. The assistant
+  turn is the reasoning and messages of the span, then the action: the executed file
+  (`` File `path`: ```python``` ``) when the code is not inline, then the command in a `bash` block, or the
+  tool and its arguments in a `json` block. A literal `<image>` in recorded text is written as `< image>`.
+- `images`: paths relative to the SFT directory, one per `<image>` placeholder, in order.
+- `meta`: `schema`, `episode_id`, `step_index`, `steps_in_episode`, `task_success` (adapter label or null),
+  `action_failed`, `human_input`, `control`, `signature`, `has_analysis`, `prompt_chars`, `target_chars`.
+
+`skipped_steps` counts steps left out and why: `no_control_evidence` (unless `--keep-no-control`),
+`action_failed` (`--drop-failed`), `episode_not_successful` (`--success-only`), `action_clipped` (the command was
+cut at export, so the target would be incomplete). Text is redacted again when samples are built.
 
 ## Loading
 

@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 import shutil
 
-from . import export as export_mod, steps as steps_mod
+from . import codex, export as export_mod, steps as steps_mod
 from .redact import Redactor
 
 SCHEMA = "robot-control-chat/v1"
@@ -116,7 +116,7 @@ def _exported_counts(records):
         if "call_id" in record:
             counts["tool_call"] += "command" in record or "args" in record
             counts["tool_output"] += "text" in record
-        counts["images"] += len(record.get("images", [])) + record.get("images_missing", 0)
+        counts["images"] += len(record.get("images", []))
     return counts
 
 
@@ -127,23 +127,21 @@ class Session:
     def text(self, value):
         return steps_mod.clip(value, self.options.max_chars) if self.options.max_chars else value
 
+    def image(self, key):
+        """images/<sha256[:16]>.<ext>, or None when the recording holds no bytes (or --images none)."""
+        image = self.rollout.images.get(key)
+        if self.options.images == "none" or image is None or image.data is None:
+            return None
+        name = key[:16] + export_mod.EXTENSIONS.get(image.mime or "", ".png")
+        path = self.folder / "images" / name
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(image.data)
+        return f"images/{name}"
+
     def images(self, record, keys):
-        saved, missing = [], 0
-        for key in keys:
-            image = self.rollout.images.get(key)
-            if self.options.images == "none" or image is None or image.data is None:
-                missing += 1
-                continue
-            name = key[:16] + export_mod.EXTENSIONS.get(image.mime or "", ".png")
-            path = self.folder / "images" / name
-            if not path.exists():
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(image.data)
-            saved.append(f"images/{name}")
-        if saved:
-            record["images"] = saved
-        if missing:
-            record["images_missing"] = missing
+        if keys:
+            record["images"] = [self.image(key) for key in keys]
 
     def records(self, piece, seq):
         event, record = piece.event, {"seq": seq, "category": piece.category}
@@ -177,6 +175,9 @@ class Session:
             if exit_code is not None:
                 record["exit_code"] = exit_code
             self.images(record, event.images)
+            if event.output_parts and not event.continued:
+                record["parts"] = [{"text": self.text(value)} if kind == "text" else {"image": self.image(value)}
+                                   for kind, value in event.output_parts]
         record["ts"] = event.ts if piece.part == "call" else event.end_ts or event.ts
         if piece.part == "output" or event.role not in ("act", "observe"):
             return [record]
@@ -248,11 +249,15 @@ def check_session(folder):
             if record["category"] == "feedback" and record.get("action") not in actions:
                 errors.append(f"{where}: seq {record['seq']}: feedback for an action outside this round")
             for rel in record.get("images", []):
-                path = folder / rel
+                path = folder / rel if rel else None
+                if path is None:
+                    continue
                 if not path.is_file():
                     errors.append(f"{where}: image {rel} is missing")
                 elif hashlib.sha256(path.read_bytes()).hexdigest()[:16] != Path(rel).stem:
                     errors.append(f"{where}: image {rel} does not match its content")
+            if "parts" in record and [p["image"] for p in record["parts"] if "image" in p] != record.get("images"):
+                errors.append(f"{where}: seq {record['seq']}: parts and images list different images")
         for call_id in actions:
             if call_id not in answered and call_id not in unanswered:
                 errors.append(f"{where}: action {call_id} without feedback")
@@ -273,6 +278,100 @@ def check(out):
     for entry in manifest["sessions"]:
         if "id" in entry:
             errors += [f"{entry['id']}: {e}" for e in check_session(out / "sessions" / entry["id"])]
+    return errors
+
+
+def _raw_key(url):
+    _, data = codex.decode_data_url(url)
+    if data is not None:
+        return hashlib.sha256(data).hexdigest()
+    return "url:" + hashlib.sha256(url.encode("utf-8", "replace")).hexdigest()
+
+
+def _raw_keys(value):
+    """Image items anywhere in a recorded value, in document order."""
+    if isinstance(value, list):
+        return [k for v in value for k in _raw_keys(v)]
+    if not isinstance(value, dict):
+        return []
+    if value.get("file_id"):
+        return ["file:" + str(value["file_id"])]
+    url = value.get("image_url")
+    url = url.get("url") if isinstance(url, dict) else url
+    if isinstance(url, str) and url:
+        return [_raw_key(url)]
+    return [k for v in value.values() for k in _raw_keys(v)]
+
+
+def raw_images(path):
+    """Read straight from the rollout file, without the reader: the images of each tool output by call_id, the images
+    of user-role messages in file order, and the images event_msg user messages list."""
+    calls, user, typed = {}, [], set()
+    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        kind, item = (record.get("type"), record.get("payload")) if "payload" in record else ("response_item", record)
+        if not isinstance(item, dict):
+            continue
+        if kind == "response_item" and item.get("type") in ("function_call_output", "custom_tool_call_output",
+                                                             "tool_search_output"):
+            calls.setdefault(item.get("call_id"), []).extend(_raw_keys(item.get("output")))
+        elif kind == "response_item" and item.get("type") == "message" and item.get("role") == "user":
+            user += _raw_keys(item.get("content"))
+        elif kind == "event_msg" and item.get("type") == "user_message":
+            typed.update(_raw_key(u) for u in item.get("images") or [] if isinstance(u, str) and u)
+    return calls, user, typed
+
+
+def _same(ref, key, saved):
+    if ref is None:
+        return not saved or key.startswith(("url:", "file:"))
+    return Path(ref).stem == key[:16]
+
+
+def crosscheck(rollout_path, folder, saved=True):
+    """Every image reference in rounds.jsonl against where the image is in the raw rollout. A tool output's images
+    belong to that call, in that order. Images an older CLI injected after view_image, and images on user messages,
+    come from user-role messages: in file order, the injected ones in the order of their calls."""
+    calls, user, typed = raw_images(rollout_path)
+    exported, free = {}, []
+    for line in (Path(folder) / "rounds.jsonl").read_text(encoding="utf-8").splitlines():
+        for record in json.loads(line)["events"] if line.strip() else []:
+            if "images" in record and not _is_rationale(record):
+                if "call_id" in record:
+                    exported.setdefault(record["call_id"], []).extend(record["images"])
+                else:
+                    free.extend(record["images"])
+    errors, injected = [], []
+    for call_id in list(exported) + [c for c in calls if c not in exported]:
+        raw, got = calls.get(call_id, []), exported.get(call_id, [])
+        if len(got) < len(raw) or not all(_same(r, k, saved) for r, k in zip(got, raw)):
+            errors.append(f"call {call_id}: images differ from its output in the recording")
+        else:
+            injected += [(call_id, r) for r in got[len(raw):]]
+    taken, found = set(), []
+    for call_id, r in injected:
+        index = next((i for i, k in enumerate(user) if i not in taken and _same(r, k, saved)), None)
+        if index is None:
+            errors.append(f"call {call_id}: an attached image is not in the recording")
+            continue
+        taken.add(index)
+        found.append((call_id, index))
+    wrong = {c for n, (first, a) in enumerate(found) for second, b in found[n + 1:] if b < a for c in (first, second)}
+    if wrong:
+        errors.append(f"calls {', '.join(sorted(map(str, wrong)))}: attached images are not in the recorded order")
+    pool, position = [k for i, k in enumerate(user) if i not in taken], 0
+    for r in free:
+        if position < len(pool) and _same(r, pool[position], saved):
+            position += 1
+        elif not any(_same(r, k, saved) for k in typed):
+            errors.append(f"user image {r} is not where the recording has it")
+    if position < len(pool):
+        errors.append(f"{len(pool) - position} user-role image(s) of the recording are not in the export")
     return errors
 
 
@@ -309,6 +408,7 @@ def export(paths, out, options: Options, overwrite=False, log=print):
                 "options": redactor.obj(settings), "sessions": []}
     gate = export_mod.Options(profiles=options.profiles, auto_profiles=options.auto_profiles,
                               images="none" if options.images == "none" else "seen", use_adapters=False)
+    image_errors = []
     for path in map(Path, paths):
         try:
             rollout, profile, episodes, _, _ = export_mod.analyse(path, gate)
@@ -325,13 +425,14 @@ def export(paths, out, options: Options, overwrite=False, log=print):
             continue
         folder = _folder(out, rollout)
         lines, groups = Session(folder, rollout, profile, options).write(redactor)
+        image_errors += [f"{folder.name}: {e}" for e in crosscheck(path, folder, options.images != "none")]
         manifest["sessions"].append({"id": folder.name, "rollout_file": path.name, "rollout_sha256": rollout.sha256,
                                      "rounds": lines, "actions": acts})
         log(f"{path.name}: {groups} round(s) with actions, {lines - groups} final")
     manifest["redaction"] = {"enabled": options.redact, "counts": redactor.counts,
                              "custom_paths": len(options.path_map)}
     _write_manifest(out, manifest)
-    errors = check(out)
+    errors = check(out) + image_errors
     manifest["check"] = {"errors": len(errors), "first": errors[:20]}
     _write_manifest(out, manifest)
     return manifest

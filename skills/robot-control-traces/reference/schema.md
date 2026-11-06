@@ -185,8 +185,8 @@ Each event has `seq` (session-wide, increasing), `category`, `ts`, and depending
 
 | category | from | fields |
 |---|---|---|
-| `task` | user messages (the first is the task, later ones are interjections) | `text`, `images` |
-| `observation` | observe calls with their output; images sent by the user (`kind: user_image`) | `call_id`, `tool`, `command` or `args`, `text`, `exit_code`, `images` |
+| `task` | user messages (the first is the task, later ones are interjections) with the images sent with them | `text`, `images` |
+| `observation` | observe calls with their output; image-only user-role messages no call claims (`kind: user_image`) | `call_id`, `tool`, `command` or `args`, `text`, `exit_code`, `images`, `parts` |
 | `analysis` | reasoning summaries (`kind: reasoning`), assistant messages (`kind: message`, `phase`); rationale values of a call (`kind`: the option or argument name, plus `call_id`) | `text` |
 | `action` | act calls | `call_id`, `tool`, `command` or `args`, `code` (recovered from heredocs, `python -c` or earlier file writes) |
 | `feedback` | the output of an action (`call_id` = `action`); later results through `write_stdin` or a `result` call (own `call_id`, `tool`, `command`/`args`) | `action`, `text`, `exit_code`, `images` |
@@ -195,14 +195,30 @@ Each event has `seq` (session-wide, increasing), `category`, `ts`, and depending
 A rationale entry repeats a value that is also in its call's command or arguments, has the call's `seq` and comes
 right before it. `text` is present whenever the recording has an output (possibly empty); the exec header Codex
 puts before shell output (wall time, exit line) is not part of `text`, its exit code is `exit_code`. Texts are
-whole unless `--max-chars N` is given. `images_missing` counts
-images whose bytes are not in the rollout. System prompts and environment context are not exported.
+whole unless `--max-chars N` is given. System prompts and environment context are not exported.
+
+Images sit on the piece they arrived with, in recorded order; `null` keeps the place of an image whose bytes the
+recording lacks (a remote URL, a broken data URL) and of every image with `--images none`.
+
+- A tool output's images are on that call's record (`observation`, `feedback` or `other`).
+- A user's images are on their `task` line. Codex records each input twice, the response item holding the image
+  bytes and the event_msg the typed text; the two copies are merged only when they are adjacent records.
+- Older Codex versions answer `view_image` with text and inject the image as a user-role message after the outputs.
+  Such an image goes to the earliest successful `view_image` call still waiting (one image per call, in call order),
+  and only until the model's next output; a call whose output reports a failure waits for nothing.
+- When a tool output has text after an image (`"head:"`, image, `"wrist:"`, image), the record also has `parts`:
+  `[{"text": ...}, {"image": ...}, ...]` in recorded order. `text` and `images` hold the same content.
 
 `check` (run after writing, result in the manifest, non-zero exit on errors): `seq` increases; each rationale entry
 is followed by its call; each feedback's `action` is an action of the same round; each action has feedback or is
-listed in `actions_without_feedback`; every image file exists and its hash matches the name; per kind (user
-messages, reasoning, assistant messages, tool calls, tool outputs, images, compactions) the export holds exactly
-as many pieces as `source_counts` read from the rollout.
+listed in `actions_without_feedback`; every image file exists and its hash matches the name; `parts` and `images`
+list the same images; per kind (user messages, reasoning, assistant messages, tool calls, tool outputs, images,
+compactions) the export holds exactly as many pieces as `source_counts` read from the rollout.
+
+Image cross-check (at export, against the raw rollout file read without the reader): the images of each call's
+record equal the images of that call's output record in the file, in order, plus at most images injected after a
+`view_image`, which must come from user-role messages in the order of their calls; the images on user messages are
+the remaining user-role images in file order. A swapped, moved, dropped or extra image is reported with its call.
 
 ## Loading
 

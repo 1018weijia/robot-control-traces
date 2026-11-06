@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import bisect
 import dataclasses
 import hashlib
 import json
@@ -24,6 +25,9 @@ CONTEXT_PREFIXES = ("<environment_context>", "<user_instructions>", "# AGENTS.md
 SESSION_ID_RE = re.compile(r"[Ss]ession ID[:\s]+(\d+)")
 EXIT_RE = re.compile(r"(?:Process exited with code|Exit code:)\s*(-?\d+)")
 WALL_RE = re.compile(r"Wall time:\s*([\d.]+)\s*s")
+VIEW_FAILED_RE = re.compile(r"(?i)\b(unable|error|failed|not found|no such|cannot|denied|invalid)\b")
+MODEL_ITEMS = {"reasoning", "function_call", "custom_tool_call", "local_shell_call", "web_search_call",
+               "tool_search_call"}
 
 
 @dataclasses.dataclass
@@ -64,6 +68,8 @@ class Event:
     continued: bool = False
     own_output: str | None = None
     own_exit_code: int | None = None
+    # [("text", str) | ("image", key)] in recorded order, only when text follows an image in the output
+    output_parts: list | None = None
     # filled by later stages
     role: str | None = None
     rule: str | None = None
@@ -185,6 +191,7 @@ class _Builder:
         self.view_paths = {}
         self.mcp_end = {}
         self.end_lines = {}
+        self.awaiting = []          # view_image calls whose image an older CLI injects as a following user message
         self.cwd = None
         self.seq = 0
 
@@ -206,13 +213,18 @@ class _Builder:
             return key
         mime, data = decode_data_url(url)
         if data is None:
-            return None
+            if not isinstance(url, str) or not url:
+                return None
+            # a remote URL or a broken data URL: no bytes, but the image stays in its place as missing
+            key = "url:" + hashlib.sha256(url.encode("utf-8", "replace")).hexdigest()
+            self.images.setdefault(key, Image(key, mime, None, source, call_id=call_id))
+            return key
         key = hashlib.sha256(data).hexdigest()
         if key not in self.images:
             self.images[key] = Image(key, mime, data if self.keep_images else None, source, call_id=call_id)
         return key
 
-    def _content(self, content, source, call_id=None):
+    def _content(self, content, source, call_id=None, parts=None):
         texts, images = [], []
         if isinstance(content, str):
             return [content], []
@@ -222,6 +234,8 @@ class _Builder:
             kind = item.get("type")
             if kind in ("input_text", "output_text", "text", "summary_text", "reasoning_text") and item.get("text"):
                 texts.append(str(item["text"]))
+                if parts is not None:
+                    parts.append(("text", texts[-1]))
             elif kind in ("input_image", "image", "image_url") or "image_url" in item or "file_id" in item:
                 url = item.get("image_url")
                 if isinstance(url, dict):
@@ -229,14 +243,16 @@ class _Builder:
                 key = self._image(url=url, file_id=item.get("file_id"), source=source, call_id=call_id)
                 if key:
                     images.append(key)
+                    if parts is not None:
+                        parts.append(("image", key))
             if item.get("encrypted_content"):
                 self.stats["encrypted_dropped"] += 1
         return texts, images
 
     def _output(self, output, call_id):
-        """Tool output → (text, image keys, exit code, duration, running process session id)."""
+        """Tool output → (text, image keys, exit code, duration, running process session id, parts)."""
         exit_code = duration = session = None
-        images = []
+        images, parts = [], []
         if isinstance(output, dict):
             if "content_items" in output:
                 output = output["content_items"]
@@ -245,10 +261,13 @@ class _Builder:
                     exit_code = 1
                 output = output.get("content", json.dumps(output, ensure_ascii=False))
         if isinstance(output, list):
-            texts, images = self._content(output, "tool_output", call_id)
+            texts, images = self._content(output, "tool_output", call_id, parts)
             text = "\n".join(texts)
         else:
             text = "" if output is None else str(output)
+        kinds = [kind for kind, _ in parts]
+        if "image" in kinds and "text" in kinds[kinds.index("image"):]:
+            return text, images, exit_code, duration, session, parts
         parsed = _parse_json(text)
         if isinstance(parsed, dict) and "output" in parsed and isinstance(parsed.get("metadata"), dict):
             meta = parsed["metadata"]
@@ -267,7 +286,7 @@ class _Builder:
                 session = match.group(1)
             if "\nOutput:\n" in text[:2000]:
                 text = text.split("\nOutput:\n", 1)[1]
-        return text, images, exit_code, duration, session
+        return text, images, exit_code, duration, session, None
 
     # ---- records ----------------------------------------------------------------------------------------------
     def feed(self, kind, payload, ts):
@@ -296,6 +315,9 @@ class _Builder:
         kind = item.get("type")
         if item.get("encrypted_content"):
             self.stats["encrypted_dropped"] += 1
+        if kind in MODEL_ITEMS or (kind == "message" and item.get("role") == "assistant"):
+            # an injected image always precedes the model's next output; later images belong to no call
+            self.awaiting.clear()
         if kind == "message":
             role = item.get("role")
             if role in ("developer", "system"):
@@ -307,13 +329,10 @@ class _Builder:
                 if text:
                     self._event("assistant_message", ts, text=text, phase=item.get("phase"))
                 return
-            pending = self._pending_view_image()
-            if images and pending is not None:
-                for key in images:
-                    self.images[key].source = "view_image"
-                    self.images[key].call_id = pending.call_id
-                pending.images += images
-                return
+            if images and not text and self.awaiting:
+                images = self._attach_injected(images)
+                if not images:
+                    return
             if text and text.startswith(CONTEXT_PREFIXES):
                 self.stats["context_messages"] += 1
                 text = ""
@@ -334,7 +353,11 @@ class _Builder:
             if call is None:
                 call = self._event("tool_call", ts, call_id=item.get("call_id"), tool=item.get("name") or "unknown")
                 self.warnings.append(f"output without a matching call: {item.get('call_id')}")
-            text, images, exit_code, duration, session = self._output(item.get("output"), call.call_id)
+            text, images, exit_code, duration, session, parts = self._output(item.get("output"), call.call_id)
+            call.output_parts = parts if call.output is None else None
+            if call.output is None and not images and (call.tool or "").split(".")[-1] == "view_image" \
+                    and not VIEW_FAILED_RE.search(text):
+                self.awaiting.append(call)
             call.output = text if call.output is None else call.output + "\n" + text
             call.images += images
             call.exit_code = exit_code if exit_code is not None else call.exit_code
@@ -366,13 +389,18 @@ class _Builder:
         if call_id:
             self.calls[call_id] = event
 
-    def _pending_view_image(self):
-        for event in reversed(self.events[-6:]):
-            if event.kind == "tool_call" and event.tool and event.tool.split(".")[-1] == "view_image":
-                return None if event.images else event
-            if event.kind in ("tool_call", "user_message", "assistant_message"):
-                return None
-        return None
+    def _attach_injected(self, images):
+        """Older CLIs answer view_image with text and inject the image as a user message after the outputs, one image
+        per successful call in call order. Returns the images left over."""
+        rest = []
+        for key in images:
+            if not self.awaiting:
+                rest.append(key)
+                continue
+            call = self.awaiting.pop(0)
+            self.images[key].source, self.images[key].call_id = "view_image", call.call_id
+            call.images.append(key)
+        return rest
 
     def _event_msg(self, msg, ts):
         kind = msg.get("type")
@@ -439,19 +467,36 @@ class _Builder:
         has = {k: any(e.kind == k for e in self.events) for k in ("user_message", "assistant_message", "reasoning")}
         events = self.fallback["user_message"]
         if events:
-            # event_msg user messages are exactly what the human typed; response-item copies may include context.
+            # event_msg user messages are exactly what the human typed; response-item copies may include context
+            # but hold the image bytes. Both copies of one input are adjacent records: pair them so the images stay
+            # with the text they were sent with.
+            positions = [e.raw for e in self.events] + [line for *_, line in events]
+            if not has["assistant_message"]:
+                positions += [line for *_, line in self.fallback["agent_message"]]
+            if not has["reasoning"]:
+                positions += [line for *_, line in self.fallback["agent_reasoning"]]
+            positions.sort()
+            candidates = [e for e in self.events if e.images and (e.kind == "user_message" or
+                                                                  (e.kind == "image" and e.origin == "user"))]
+            used, typed = set(), []
+            for ts, text, images, line in events:
+                match = _adjacent(candidates, used, line, positions)
+                if match is not None:
+                    used.add(id(match))
+                    images = match.images + [k for k in images if k not in match.images]
+                typed.append((ts, text, images, line, match is not None))
             kept = []
             for event in self.events:
+                if id(event) in used or (event.kind == "user_message" and not event.images):
+                    continue
                 if event.kind == "user_message":
-                    if not event.images:
-                        continue
                     event.kind, event.text, event.origin = "image", "", "user"
                 kept.append(event)
             self.events = kept
-            known = {k for e in self.events for k in e.images}
-            for ts, text, images, line in events:
-                self._event("user_message", ts, raw=line, text=text, images=[k for k in images if k not in known],
-                            origin="event_msg")
+            known = {k for e in self.events if e.kind == "image" for k in e.images}
+            for ts, text, images, line, paired in typed:
+                self._event("user_message", ts, raw=line, text=text, origin="event_msg",
+                            images=images if paired else [k for k in images if k not in known])
         if not has["assistant_message"]:
             for ts, text, phase, line in self.fallback["agent_message"]:
                 self._event("assistant_message", ts, raw=line, text=text, phase=phase, origin="event_msg")
@@ -487,6 +532,16 @@ class _Builder:
                         origin.exit_code = event.exit_code
             elif event.process_session:
                 sessions[event.process_session] = event
+
+
+def _adjacent(candidates, used, line, positions):
+    """The unused candidate with no other record between it and ``line``; the one before wins over the one after."""
+    def between(a, b):
+        low, high = min(a, b), max(a, b)
+        return bisect.bisect_left(positions, high) - bisect.bisect_right(positions, low)
+    options = sorted((c for c in candidates if id(c) not in used and c.raw != line),
+                     key=lambda c: (c.raw > line, abs(c.raw - line)))
+    return next((c for c in options if between(c.raw, line) == 0), None)
 
 
 def read_rollout(path, keep_images=True) -> Rollout:

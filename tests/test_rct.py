@@ -1,6 +1,7 @@
 """Offline tests: python3 -m unittest discover -s tests"""
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -26,6 +27,14 @@ robo.move_to(GRIP + [0, 0, 0.06], arm="right", pitch=20, speed=0.1)
 robo.set_gripper("right", OPEN)
 """
 CELL2 = CELL.replace("-0.44", "-0.455").replace("# approach", "# cup axis 1.5 cm nearer; approach")
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def ref(data):
+    return f"images/{sha(data)[:16]}.png"
 
 
 def export(paths, out, **kw):
@@ -100,6 +109,52 @@ class ReaderTests(unittest.TestCase):
         self.assertIn("done: reached", first.output)
         self.assertEqual((first.exit_code, second.continuation_of), (0, first.seq))
         self.assertEqual((first.own_output, first.own_exit_code), ("starting", None))
+
+    def test_injected_images_follow_their_calls(self):
+        head, wrist, late = png((10, 0, 0)), png((0, 10, 0)), png((0, 0, 10))
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().context().user("look")
+            gone = b.view_call("/home/alice/run/missing.png")
+            first = b.view_call("/home/alice/run/cam_head.png")
+            second = b.view_call("/home/alice/run/cam_wrist.png")
+            b.raw_output(gone, "unable to locate image at `/home/alice/run/missing.png`: No such file or directory")
+            b.raw_output(first, "attached local image path").raw_output(second, "attached local image path")
+            b.image_message(head).image_message(wrist)
+            b.reasoning("both views checked")
+            side = b.view_call("/home/alice/run/cam_side.png")
+            b.raw_output(side, "attached local image path")
+            b.reasoning("the side view did not arrive")
+            b.image_message(late)
+            rollout = codex.read_rollout(b.write(Path(tmp) / "r.jsonl"))
+        calls = {e.call_id: e for e in rollout.events if e.kind == "tool_call"}
+        self.assertEqual([calls[c].images for c in (gone, first, second, side)],
+                         [[], [sha(head)], [sha(wrist)], []])
+        self.assertEqual([e.images for e in rollout.events if e.kind == "image"], [[sha(late)]])
+
+    def test_user_images_stay_with_their_message(self):
+        photo = png((1, 2, 3))
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().context().user("put it here", image=photo)
+            b.user("and this one", url="https://example.com/cup.png")
+            rollout = codex.read_rollout(b.write(Path(tmp) / "r.jsonl"))
+        first, second = [e for e in rollout.events if e.kind == "user_message"]
+        self.assertEqual((first.text, first.images), ("put it here", [sha(photo)]))
+        self.assertEqual(len(second.images), 1, "an image without recorded bytes is kept as missing, not dropped")
+        self.assertIsNone(rollout.images[second.images[0]].data)
+        self.assertFalse([e for e in rollout.events if e.kind == "image"])
+
+    def test_interleaved_output_keeps_order(self):
+        head, wrist, frame = png((10, 0, 0)), png((0, 10, 0)), png((0, 0, 10))
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().user("look")
+            b.mcp("get_cameras", {}, parts=["head:", head, "wrist:", wrist], namespace="mcp__robot")
+            b.mcp("observe", {}, "frame", image=frame, namespace="mcp__robot")
+            rollout = codex.read_rollout(b.write(Path(tmp) / "r.jsonl"))
+        cams, observe = [e for e in rollout.events if e.kind == "tool_call"]
+        self.assertEqual(cams.output_parts, [("text", "head:"), ("image", sha(head)), ("text", "wrist:"),
+                                             ("image", sha(wrist))])
+        self.assertEqual((cams.output, cams.images), ("head:\nwrist:", [sha(head), sha(wrist)]))
+        self.assertIsNone(observe.output_parts, "text then images is already unambiguous")
 
     def test_record_positions(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -359,15 +414,15 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(session["task"], "把碗放到盘子里")
         self.assertEqual([r["round"] for r in rounds], [0, 1, 2, "final"])
         cats = [[e["category"] for e in r["events"]] for r in rounds]
-        self.assertEqual(cats[0], ["observation", "task", "observation", "analysis", "analysis", "action", "feedback"])
+        self.assertEqual(cats[0], ["task", "observation", "analysis", "analysis", "action", "feedback"])
         self.assertEqual(cats[1], ["analysis", "action", "action", "feedback", "analysis", "feedback"])
         self.assertEqual(cats[2], ["other", "other", "action", "feedback", "analysis", "feedback"])
         self.assertEqual(cats[3], ["task", "analysis"])
         first, second, third, final = [r["events"] for r in rounds]
-        self.assertEqual(first[0]["kind"], "user_image")
-        self.assertEqual(first[2]["tool"], "view_image")
-        self.assertEqual(first[3]["text"], "bowl at left; approach from above")
-        note, act, feedback = first[4:]
+        self.assertEqual((first[0]["text"], first[0]["images"]), ("把碗放到盘子里", [ref(png((1, 1, 1)))]))
+        self.assertEqual((first[1]["tool"], first[1]["images"]), ("view_image", [ref(png((2, 2, 2)))]))
+        self.assertEqual(first[2]["text"], "bowl at left; approach from above")
+        note, act, feedback = first[3:]
         self.assertEqual((note["kind"], note["text"], note["call_id"], note["seq"]),
                          ("--note", "reach over the bowl", act["call_id"], act["seq"]))
         self.assertEqual(act["command"], "robot_cli move_to --x 0.1 --note 'reach over the bowl'")
@@ -377,7 +432,7 @@ class ChatTests(unittest.TestCase):
         self.assertEqual([e.get("text") for e in second[3:]], ["left closed", "left done, waiting for right",
                                                                "right closed"])
         self.assertEqual(second[5]["action"], second[2]["call_id"])
-        self.assertEqual(len(second[5]["images"]), 1)
+        self.assertEqual(second[5]["images"], [ref(png((3, 3, 3)))])
         self.assertTrue(rounds[2]["context_reset"])
         self.assertFalse(rounds[1]["context_reset"])
         self.assertEqual(third[1]["kind"], "compaction")
@@ -393,6 +448,39 @@ class ChatTests(unittest.TestCase):
         for secret in ("/home/alice", "SECRET SYSTEM PROMPT", "environment_context", "permissions instructions"):
             self.assertNotIn(secret, text)
         self.assertEqual(manifest["sessions"][0]["rounds"], 4)
+
+    def test_images_stay_with_their_content(self):
+        photo, head, wrist, head2, wrist2 = (png((1, 2, 3)), png((10, 0, 0)), png((0, 10, 0)), png((20, 0, 0)),
+                                             png((0, 20, 0)))
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().context().user("put it here", image=photo)
+            b.user("and this one", url="https://example.com/cup.png")
+            first = b.view_call("/home/alice/run/cam_head.png")
+            second = b.view_call("/home/alice/run/cam_wrist.png")
+            b.raw_output(first, "attached local image path").raw_output(second, "attached local image path")
+            b.image_message(head).image_message(wrist)
+            b.mcp("get_cameras", {}, parts=["head:", head2, "wrist:", wrist2], namespace="mcp__robot")
+            b.shell("robot_cli move_to --x 0.1", "ok")
+            path = b.write(Path(tmp) / "r.jsonl")
+            out, manifest = self.export(tmp, [path])
+            folder, rounds = self.rounds(out)
+            events = rounds[0]["events"]
+            tasks = [e for e in events if e["category"] == "task"]
+            views = [e for e in events if e.get("tool") == "view_image"]
+            cams = next(e for e in events if e.get("tool") == "mcp__robot.get_cameras")
+            views[0]["images"], views[1]["images"] = views[1]["images"], views[0]["images"]
+            (folder / "rounds.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rounds))
+            swapped = chat_mod.check(out), chat_mod.crosscheck(path, folder)
+        self.assertEqual(manifest["check"]["first"], [])
+        self.assertEqual([(t["text"], t["images"]) for t in tasks], [("put it here", [ref(photo)]),
+                                                                     ("and this one", [None])])
+        self.assertEqual([v["call_id"] for v in views], [first, second])
+        self.assertEqual([v["images"] for v in views], [[ref(wrist)], [ref(head)]], "after the swap")
+        self.assertEqual(cams["parts"], [{"text": "head:"}, {"image": ref(head2)}, {"text": "wrist:"},
+                                         {"image": ref(wrist2)}])
+        self.assertEqual((cams["text"], cams["images"]), ("head:\nwrist:", [ref(head2), ref(wrist2)]))
+        self.assertEqual(swapped[0], [], "file names still match their content")
+        self.assertTrue(any(first in e for e in swapped[1]), swapped[1])
 
     def test_gate_and_missing_feedback(self):
         with tempfile.TemporaryDirectory() as tmp:

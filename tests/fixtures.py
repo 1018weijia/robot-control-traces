@@ -62,13 +62,30 @@ class RolloutBuilder:
             {"type": "input_text", "text": "<environment_context>\n  <cwd>/home/alice</cwd>\n</environment_context>"}]})
         return self
 
-    def user(self, text, image=None):
+    def user(self, text, image=None, url=None):
+        """``image``: PNG bytes sent inline; ``url``: an image the user referenced by URL (no bytes recorded)."""
         content = [{"type": "input_text", "text": text}]
-        if image is not None:
-            content.append({"type": "input_image", "image_url": data_url(image)})
+        urls = [data_url(image)] if image is not None else [url] if url else []
+        content += [{"type": "input_image", "image_url": u} for u in urls]
         self._line("response_item", {"type": "message", "role": "user", "content": content})
-        self._line("event_msg", {"type": "user_message", "message": text,
-                                 "images": [] if image is None else [data_url(image)]})
+        self._line("event_msg", {"type": "user_message", "message": text, "images": urls})
+        return self
+
+    def image_message(self, data):
+        """An image-only user-role message, as older CLIs injected after view_image."""
+        self._line("response_item", {"type": "message", "role": "user", "content": [
+            {"type": "input_image", "image_url": data_url(data)}]})
+        return self
+
+    def view_call(self, path):
+        cid = self.call_id()
+        self._line("response_item", {"type": "function_call", "name": "view_image", "call_id": cid,
+                                     "arguments": json.dumps({"path": path})})
+        self._line("event_msg", {"type": "view_image_tool_call", "call_id": cid, "path": path})
+        return cid
+
+    def raw_output(self, cid, output):
+        self._line("response_item", {"type": "function_call_output", "call_id": cid, "output": output})
         return self
 
     def reasoning(self, text):
@@ -144,7 +161,8 @@ class RolloutBuilder:
                 {"type": "input_image", "image_url": data_url(data)}]})
         return cid
 
-    def mcp(self, name, args, output="ok", image=None, namespace=None):
+    def mcp(self, name, args, output="ok", image=None, namespace=None, parts=None):
+        """``parts``: output content in order, str for text and bytes for an image."""
         cid = self.call_id()
         item = {"type": "function_call", "name": name, "arguments": json.dumps(args), "call_id": cid}
         if namespace:
@@ -153,6 +171,9 @@ class RolloutBuilder:
         items = [{"type": "input_text", "text": output}]
         if image is not None:
             items.append({"type": "input_image", "image_url": data_url(image)})
+        if parts is not None:
+            items = [{"type": "input_text", "text": p} if isinstance(p, str) else
+                     {"type": "input_image", "image_url": data_url(p)} for p in parts]
         self._line("response_item", {"type": "function_call_output", "call_id": cid, "output": items})
         return cid
 

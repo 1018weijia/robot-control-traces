@@ -160,6 +160,50 @@ A `train.jsonl` row:
 `action_failed` (`--drop-failed`), `episode_not_successful` (`--success-only`), `action_clipped` (the command was
 cut at export, so the target would be incomplete). Text is redacted again when samples are built.
 
+## Chat output (`robot-control-chat/v1`, written by `rct.py chat`)
+
+```
+CHAT/
+  manifest.json                 schema, created_at, options, sessions (id, rollout_file, rollout_sha256, rounds,
+                                actions; or skipped with the reason), redaction, check {errors, first}
+  sessions/<date>_<thread8>/
+    rounds.jsonl                one decision round per line
+    session.json                schema, session, source, agent, task, profiles, rounds, final_round, counts,
+                                source_counts, actions_without_feedback [{call_id, reason}]
+    images/<sha256[:16]>.<ext>  images the model received
+```
+
+A `rounds.jsonl` line: `round` (0, 1, … or `"final"` for what follows the last action), `actions` (call ids of
+the round's actions in order), `context_reset` (a context compaction happened in the round), `events`.
+
+Order is the order of records in the rollout file; a tool call and its output are separate records, so an output
+sits where the model received it (after other calls issued in parallel, after reasoning written while waiting).
+A round ends with the last feedback of its actions: actions issued before any of them returned share a round, and
+waiting, polling and `write_stdin` for a running action stay in it.
+
+Each event has `seq` (session-wide, increasing), `category`, `ts`, and depending on the category:
+
+| category | from | fields |
+|---|---|---|
+| `task` | user messages (the first is the task, later ones are interjections) | `text`, `images` |
+| `observation` | observe calls with their output; images sent by the user (`kind: user_image`) | `call_id`, `tool`, `command` or `args`, `text`, `exit_code`, `images` |
+| `analysis` | reasoning summaries (`kind: reasoning`), assistant messages (`kind: message`, `phase`); rationale values of a call (`kind`: the option or argument name, plus `call_id`) | `text` |
+| `action` | act calls | `call_id`, `tool`, `command` or `args`, `code` (recovered from heredocs, `python -c` or earlier file writes) |
+| `feedback` | the output of an action (`call_id` = `action`); later results through `write_stdin` or a `result` call (own `call_id`, `tool`, `command`/`args`) | `action`, `text`, `exit_code`, `images` |
+| `other` | aux calls with their output; `kind: compaction` / `turn_aborted` | as observation, or `text` |
+
+A rationale entry repeats a value that is also in its call's command or arguments, has the call's `seq` and comes
+right before it. `text` is present whenever the recording has an output (possibly empty); the exec header Codex
+puts before shell output (wall time, exit line) is not part of `text`, its exit code is `exit_code`. Texts are
+whole unless `--max-chars N` is given. `images_missing` counts
+images whose bytes are not in the rollout. System prompts and environment context are not exported.
+
+`check` (run after writing, result in the manifest, non-zero exit on errors): `seq` increases; each rationale entry
+is followed by its call; each feedback's `action` is an action of the same round; each action has feedback or is
+listed in `actions_without_feedback`; every image file exists and its hash matches the name; per kind (user
+messages, reasoning, assistant messages, tool calls, tool outputs, images, compactions) the export holds exactly
+as many pieces as `source_counts` read from the rollout.
+
 ## Loading
 
 ```python
@@ -170,4 +214,11 @@ for ep in sorted(pathlib.Path("traces/episodes").iterdir()):
         frames = [ep / i["file"] for i in step["observation"]["images"] if i["file"]]
         text = step["analysis"]["reasoning"] + [r["text"] for r in step["analysis"]["rationale"]]
         action = step["action"]["code"] or step["action"]["command"] or step["action"]["args"]
+
+for session in sorted(pathlib.Path("chat/sessions").iterdir()):
+    for line in (session / "rounds.jsonl").open():
+        round_ = json.loads(line)
+        seen = [session / f for e in round_["events"] if e["category"] == "observation" for f in e.get("images", [])]
+        thoughts = [e["text"] for e in round_["events"] if e["category"] == "analysis"]
+        actions = [e for e in round_["events"] if e["category"] == "action"]
 ```

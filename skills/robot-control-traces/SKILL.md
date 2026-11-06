@@ -1,6 +1,6 @@
 ---
 name: robot-control-traces
-description: Converts Codex conversation logs (rollout JSONL under ~/.codex/sessions) of AI-driven robot, simulator or embodied-agent control into a step-level dataset of observation, analysis, action (calls and parameter adjustments) and outcome, including the camera images the model saw, and step-level SFT samples from it. Works for any control framework through JSON profiles; file-queue (cell-queue) sessions also get ground truth from their run directories. Use when the user wants to collect, export, organize, clean or share robot control sessions, agent control traces, interaction or action logs, or Codex chat history as training or evaluation data.
+description: Converts Codex conversation logs (rollout JSONL under ~/.codex/sessions) of AI-driven robot, simulator or embodied-agent control into a step-level dataset of observation, analysis, action (calls and parameter adjustments) and outcome, including the camera images the model saw, step-level SFT samples from it, and a verbatim export of the conversation labelled by role and grouped by decision round. Works for any control framework through JSON profiles; file-queue (cell-queue) sessions also get ground truth from their run directories. Use when the user wants to collect, export, organize, clean or share robot control sessions, agent control traces, interaction or action logs, or Codex chat history as training or evaluation data.
 ---
 
 # Robot control traces
@@ -46,7 +46,7 @@ Copy this checklist and track progress:
 - [ ] 3. if roles are wrong: write a profile, re-check with --profile
 - [ ] 4. export
 - [ ] 5. validate and spot-check 2-3 steps
-- [ ] 6. if training data is wanted: sft
+- [ ] 6. if training data is wanted: sft; if the raw conversation is wanted: chat
 - [ ] 7. report to the user
 ```
 
@@ -113,6 +113,14 @@ plus `dataset_info.json` for LLaMA-Factory and `sft_manifest.json`. Options: `--
 `<image>` placeholder has a file and runs the privacy scan. Do not train on whole episodes as single samples:
 long sessions hold hundreds of images and far exceed usual cutoffs.
 
+**6b. Raw chat.** When the user wants the conversation itself rather than reshaped steps:
+`RCT chat --auto --out chat/` (or `--rollout ...`; same `--profile`, `--redact-path`, `--min-control-steps`). It
+writes `sessions/<id>/rounds.jsonl`, one decision round per line: every piece of the rollout verbatim, in file
+order, labelled `task` / `observation` / `analysis` / `action` / `feedback` / `other`, where a round ends with the
+last feedback of its actions. Actions and feedback share `call_id`; late results carry `action`. The export is read
+back and checked (order, pairing, image hashes, every recorded piece exactly once); fix any reported error before
+using the data. Open one `rounds.jsonl` and confirm the analysis before each action is about the images before it.
+
 **7. Report** the output path, episode and step counts, coverage, profile used, rollouts skipped and why, and
 anything that stayed unmatched.
 
@@ -147,7 +155,7 @@ directories leave steps transcript-only. Writing a new adapter: [reference/profi
 
 ## Additional resources
 
-- Field-by-field description of `steps.jsonl`, `episode.json`, `timeline.jsonl`, `manifest.json` and the SFT
-  output: [reference/schema.md](reference/schema.md)
+- Field-by-field description of `steps.jsonl`, `episode.json`, `timeline.jsonl`, `manifest.json`, the SFT
+  output and the chat output: [reference/schema.md](reference/schema.md)
 - Profile format, rule matching, examples for ROS 2 / MCP / SDK scripts, adapters:
   [reference/profiles.md](reference/profiles.md)

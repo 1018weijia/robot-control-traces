@@ -62,10 +62,13 @@ class RolloutBuilder:
             {"type": "input_text", "text": "<environment_context>\n  <cwd>/home/alice</cwd>\n</environment_context>"}]})
         return self
 
-    def user(self, text):
-        self._line("response_item", {"type": "message", "role": "user",
-                                     "content": [{"type": "input_text", "text": text}]})
-        self._line("event_msg", {"type": "user_message", "message": text, "images": []})
+    def user(self, text, image=None):
+        content = [{"type": "input_text", "text": text}]
+        if image is not None:
+            content.append({"type": "input_image", "image_url": data_url(image)})
+        self._line("response_item", {"type": "message", "role": "user", "content": content})
+        self._line("event_msg", {"type": "user_message", "message": text,
+                                 "images": [] if image is None else [data_url(image)]})
         return self
 
     def reasoning(self, text):
@@ -101,6 +104,22 @@ class RolloutBuilder:
                    if style != "running" else {"type": "token_count", "info": None})
         self._line("response_item", {"type": "function_call_output", "call_id": cid, "output": text})
         return cid
+
+    def call(self, cmd):
+        """A shell call whose output is written later with ``output`` (parallel calls)."""
+        cid = self.call_id()
+        self._line("response_item", {"type": "function_call", "name": "exec_command", "call_id": cid,
+                                     "arguments": json.dumps({"cmd": cmd})})
+        return cid
+
+    def output(self, cid, output, exit_code=0, image=None):
+        text = f"Wall time: 0.4 seconds\nProcess exited with code {exit_code}\nOutput:\n{output}"
+        if image is None:
+            self._line("response_item", {"type": "function_call_output", "call_id": cid, "output": text})
+        else:
+            self._line("response_item", {"type": "function_call_output", "call_id": cid, "output": [
+                {"type": "input_text", "text": text}, {"type": "input_image", "image_url": data_url(image)}]})
+        return self
 
     def stdin(self, session_id, output, exit_code=0):
         cid = self.call_id()

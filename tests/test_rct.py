@@ -7,10 +7,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 
 from fixtures import RolloutBuilder, SessionBuilder, T0, png
 
 from rct_lib import audit, calls, codex, shell
+from rct_lib import chat as chat_mod
 from rct_lib import export as export_mod
 from rct_lib import sft as sft_mod
 from rct_lib.redact import Redactor
@@ -97,6 +99,26 @@ class ReaderTests(unittest.TestCase):
         first, second = [e for e in rollout.events if e.kind == "tool_call"]
         self.assertIn("done: reached", first.output)
         self.assertEqual((first.exit_code, second.continuation_of), (0, first.seq))
+        self.assertEqual((first.own_output, first.own_exit_code), ("starting", None))
+
+    def test_record_positions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().context().user("go")
+            a = b.call("python robot_ctl.py move --x 1")
+            c = b.call("python robot_ctl.py move --x 2")
+            b.output(a, "moved 1")
+            b.reasoning("first one is done")
+            b.output(c, "moved 2")
+            b.shell("ls", "a")
+            rollout = codex.read_rollout(b.write(Path(tmp) / "r.jsonl"))
+        user, first, second, reasoning, ls = rollout.events
+        self.assertEqual((user.kind, reasoning.kind), ("user_message", "reasoning"))
+        self.assertLess(user.raw, first.raw)
+        self.assertLess(second.raw, first.output_raw)
+        self.assertLess(first.output_raw, reasoning.raw)
+        self.assertLess(reasoning.raw, second.output_raw)
+        self.assertLess(ls.raw, ls.output_raw)
+        self.assertFalse(first.continued)
 
 
 class ShellTests(unittest.TestCase):
@@ -295,6 +317,114 @@ class ControlEvidenceTests(unittest.TestCase):
         self.assertTrue(first["flags"]["control"])
 
 
+class ChatTests(unittest.TestCase):
+    def build(self, tmp):
+        b = RolloutBuilder().context().user("把碗放到盘子里", image=png((1, 1, 1)))
+        b.view_image("/home/alice/run/cam_head.png", png((2, 2, 2)))
+        b.reasoning("bowl at left; approach from above")
+        b.shell("robot_cli move_to --x 0.1 --note 'reach over the bowl'", "reached")
+        b.reasoning("close both grippers")
+        left = b.call("robot_cli set_gripper --arm left --width 0.02")
+        right = b.call("robot_cli set_gripper --arm right --width 0.02")
+        b.output(left, "left closed")
+        b.reasoning("left done, waiting for right")
+        b.output(right, "right closed", image=png((3, 3, 3)))
+        b.shell("ls /home/alice/run", "cam_head.png")
+        b.compact("summary of earlier work")
+        b.shell("python -c 'import robo; robo.move_to([0.2, 0, 0.3])'", "starting", style="running")
+        b.reasoning("still moving")
+        b.stdin(7, "done: reached")
+        b.user("stop now")
+        b.assistant("Done.", phase="final_answer")
+        return b.write(Path(tmp) / "rollout-2026-11-04T10-00-00-a.jsonl")
+
+    def export(self, tmp, paths, **kw):
+        out = Path(tmp) / "chat"
+        manifest = chat_mod.export(paths, out, chat_mod.Options(**kw), log=lambda *_: None)
+        return out, manifest
+
+    def rounds(self, out):
+        (folder,) = (out / "sessions").iterdir()
+        return folder, [json.loads(l) for l in (folder / "rounds.jsonl").read_text().splitlines()]
+
+    def test_rounds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, manifest = self.export(tmp, [self.build(tmp)])
+            folder, rounds = self.rounds(out)
+            session = json.loads((folder / "session.json").read_text())
+            errors = chat_mod.check(out)
+            text = "".join(p.read_text() for p in out.rglob("*.json*"))
+            images = sorted(p.name for p in (folder / "images").iterdir())
+        self.assertEqual(errors, [])
+        self.assertEqual(session["task"], "把碗放到盘子里")
+        self.assertEqual([r["round"] for r in rounds], [0, 1, 2, "final"])
+        cats = [[e["category"] for e in r["events"]] for r in rounds]
+        self.assertEqual(cats[0], ["observation", "task", "observation", "analysis", "analysis", "action", "feedback"])
+        self.assertEqual(cats[1], ["analysis", "action", "action", "feedback", "analysis", "feedback"])
+        self.assertEqual(cats[2], ["other", "other", "action", "feedback", "analysis", "feedback"])
+        self.assertEqual(cats[3], ["task", "analysis"])
+        first, second, third, final = [r["events"] for r in rounds]
+        self.assertEqual(first[0]["kind"], "user_image")
+        self.assertEqual(first[2]["tool"], "view_image")
+        self.assertEqual(first[3]["text"], "bowl at left; approach from above")
+        note, act, feedback = first[4:]
+        self.assertEqual((note["kind"], note["text"], note["call_id"], note["seq"]),
+                         ("--note", "reach over the bowl", act["call_id"], act["seq"]))
+        self.assertEqual(act["command"], "robot_cli move_to --x 0.1 --note 'reach over the bowl'")
+        self.assertEqual((feedback["call_id"], feedback["action"], feedback["text"], feedback["exit_code"]),
+                         (act["call_id"], act["call_id"], "reached", 0))
+        self.assertEqual(rounds[1]["actions"], [second[1]["call_id"], second[2]["call_id"]])
+        self.assertEqual([e.get("text") for e in second[3:]], ["left closed", "left done, waiting for right",
+                                                               "right closed"])
+        self.assertEqual(second[5]["action"], second[2]["call_id"])
+        self.assertEqual(len(second[5]["images"]), 1)
+        self.assertTrue(rounds[2]["context_reset"])
+        self.assertFalse(rounds[1]["context_reset"])
+        self.assertEqual(third[1]["kind"], "compaction")
+        self.assertEqual(third[2]["code"], "import robo; robo.move_to([0.2, 0, 0.3])")
+        self.assertEqual((third[3]["text"], third[5]["text"], third[5]["tool"]), ("starting", "done: reached",
+                                                                                 "write_stdin"))
+        self.assertEqual(third[5]["action"], third[2]["call_id"])
+        self.assertEqual((final[0]["text"], final[1]["text"], final[1]["phase"]), ("stop now", "Done.",
+                                                                                   "final_answer"))
+        seqs = [e["seq"] for r in rounds for e in r["events"] if not (e["category"] == "analysis" and "call_id" in e)]
+        self.assertEqual(seqs, list(range(1, len(seqs) + 1)))
+        self.assertEqual(len(images), 3)
+        for secret in ("/home/alice", "SECRET SYSTEM PROMPT", "environment_context", "permissions instructions"):
+            self.assertNotIn(secret, text)
+        self.assertEqual(manifest["sessions"][0]["rounds"], 4)
+
+    def test_gate_and_missing_feedback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().user("list files")
+            b.shell("ls", "a")
+            plain = b.write(Path(tmp) / "plain.jsonl")
+            b = RolloutBuilder(thread=str(uuid.UUID(int=2))).user("move")
+            b.call("robot_cli move_to --x 0.3")
+            cut = b.write(Path(tmp) / "cut.jsonl")
+            out, manifest = self.export(tmp, [plain, cut])
+            folder, rounds = self.rounds(out)
+            session = json.loads((folder / "session.json").read_text())
+            errors = chat_mod.check(out)
+        self.assertIn("robot-control evidence", manifest["sessions"][0]["skipped"])
+        self.assertEqual(errors, [])
+        self.assertEqual([r["round"] for r in rounds], [0])
+        self.assertEqual(session["actions_without_feedback"], [
+            {"call_id": rounds[0]["actions"][0], "reason": "no output in the recording"}])
+
+    def test_check_finds_damage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, _ = self.export(tmp, [self.build(tmp)])
+            folder, rounds = self.rounds(out)
+            next((folder / "images").iterdir()).write_bytes(png((7, 7, 7)))
+            rounds[1]["events"] = [e for e in rounds[1]["events"] if e.get("text") != "left closed"]
+            (folder / "rounds.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rounds))
+            errors = chat_mod.check(out)
+        self.assertTrue(any("does not match its content" in e for e in errors), errors)
+        self.assertTrue(any("without feedback" in e for e in errors), errors)
+        self.assertTrue(any("tool_output" in e for e in errors), errors)
+
+
 class SftTests(unittest.TestCase):
     def build(self, tmp, **kw):
         path = GenericExportTests.build(None, tmp)
@@ -476,6 +606,11 @@ class ExampleTests(unittest.TestCase):
             markdown = [p.name for p in (Path(tmp) / "output" / "episodes").glob("*/episode.md")]
             sft_errors = sft_mod.check(Path(tmp) / "sft")
             fresh_sft = (Path(tmp) / "sft" / "train.jsonl").read_text()
+            chat_errors = chat_mod.check(Path(tmp) / "chat")
+            fresh_chat = {p.parent.name: p.read_text() for p in (Path(tmp) / "chat").glob("sessions/*/rounds.jsonl")}
+        stored_chat = {p.parent.name: p.read_text() for p in (examples / "chat").glob("sessions/*/rounds.jsonl")}
+        self.assertEqual((chat_errors, len(fresh_chat)), ([], 2))
+        self.assertEqual(fresh_chat, stored_chat, "run python3 examples/make_examples.py")
         self.assertEqual(errors, [])
         self.assertEqual(totals["privacy"], {})
         self.assertEqual(len(markdown), 2)

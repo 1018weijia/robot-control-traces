@@ -5,6 +5,7 @@
   rct.py scan --detail ROLLOUT                    every command/tool signature in one rollout and its role
   rct.py export --auto --out DIR                  export every rollout found by scan
   rct.py export --rollout R1 R2 --out DIR         export specific rollouts
+  rct.py chat --rollout R1 R2 --out DIR           raw chat by decision round, every piece labelled (or --auto)
   rct.py validate DIR                             schema check, coverage, privacy scan and a redacted sample
   rct.py sft DIR --out SFT_DIR                    step-level training samples (LLaMA-Factory sharegpt layout)
   rct.py audit PATH...                            privacy scan of any dataset files, including third-party ones
@@ -21,7 +22,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from rct_lib import audit, codex, export as export_mod, profile as profile_mod, sft as sft_mod  # noqa: E402
+from rct_lib import audit, chat as chat_mod, codex, export as export_mod, profile as profile_mod  # noqa: E402
+from rct_lib import sft as sft_mod  # noqa: E402
 from rct_lib import steps as steps_mod  # noqa: E402
 from rct_lib.redact import Redactor  # noqa: E402
 from rct_lib.validate import format_report, validate  # noqa: E402
@@ -96,23 +98,29 @@ def cmd_scan(args):
     return 0
 
 
-def cmd_export(args):
+def _selected(args):
     if args.auto:
-        paths = codex.find_rollouts(codex.codex_home(args.codex_home), args.since)
-    else:
-        paths = [Path(p) for p in args.rollout or []]
+        return codex.find_rollouts(codex.codex_home(args.codex_home), args.since)
+    return [Path(p) for p in args.rollout or []]
+
+
+def _pairs(flag, items):
+    pairs = []
+    for item in items:
+        old, sep, new = item.partition("=")
+        if not sep:
+            raise SystemExit(f"{flag} expects OLD=NEW, got {item!r}")
+        pairs.append((old, new))
+    return pairs
+
+
+def cmd_export(args):
+    paths = _selected(args)
     if not paths:
         print("no rollouts selected (use --rollout FILE... or --auto)", file=sys.stderr)
         return 2
-    pairs = {}
-    for flag, items in (("--redact-path", args.redact_path), ("--remap-path", args.remap_path)):
-        pairs[flag] = []
-        for item in items:
-            old, sep, new = item.partition("=")
-            if not sep:
-                print(f"{flag} expects OLD=NEW, got {item!r}", file=sys.stderr)
-                return 2
-            pairs[flag].append((old, new))
+    pairs = {flag: _pairs(flag, items) for flag, items in (("--redact-path", args.redact_path),
+                                                           ("--remap-path", args.remap_path))}
     options = export_mod.Options(profiles=tuple(args.profile), auto_profiles=not args.no_auto_profile,
                                  images=args.images, redact=not args.no_redact, path_map=tuple(pairs["--redact-path"]),
                                  max_chars=args.max_chars, use_adapters=not args.no_adapters,
@@ -124,6 +132,27 @@ def cmd_export(args):
     errors, totals, samples = validate(args.out)
     print(format_report(errors, totals, samples))
     return 1 if errors else 0
+
+
+def cmd_chat(args):
+    paths = _selected(args)
+    if not paths:
+        print("no rollouts selected (use --rollout FILE... or --auto)", file=sys.stderr)
+        return 2
+    options = chat_mod.Options(profiles=tuple(args.profile), auto_profiles=not args.no_auto_profile,
+                               images=args.images, redact=not args.no_redact,
+                               path_map=tuple(_pairs("--redact-path", args.redact_path)), max_chars=args.max_chars,
+                               min_control_steps=args.min_control_steps)
+    manifest = chat_mod.export(paths, args.out, options, overwrite=args.overwrite)
+    written = [s for s in manifest["sessions"] if "id" in s]
+    print(f"wrote {len(written)} session(s), {sum(s['rounds'] for s in written)} round line(s) from {len(paths)} "
+          f"rollout(s) to {args.out}; skipped {len(manifest['sessions']) - len(written)}")
+    check = manifest["check"]
+    print(f"check: {check['errors']} error(s)")
+    for error in check["first"]:
+        print(f"  {error}")
+    print(audit.format_findings(audit.scan([args.out])))
+    return 1 if check["errors"] else 0
 
 
 def cmd_validate(args):
@@ -206,6 +235,20 @@ def main(argv=None):
     exp.add_argument("--min-control-steps", type=int, default=1,
                      help="skip rollouts with fewer act steps that show robot-control evidence (0 disables)")
     exp.set_defaults(func=cmd_export)
+
+    cht = sub.add_parser("chat", help="raw chat grouped by decision round, every piece labelled by category")
+    common(cht)
+    cht.add_argument("--rollout", nargs="+", help="rollout JSONL files")
+    cht.add_argument("--auto", action="store_true", help="every rollout under $CODEX_HOME (filtered by --since)")
+    cht.add_argument("--out", required=True, type=Path)
+    cht.add_argument("--overwrite", action="store_true", help="replace a previous chat export in --out")
+    cht.add_argument("--images", choices=("seen", "none"), default="seen", help="save the images the model received")
+    cht.add_argument("--redact-path", action="append", default=[], metavar="OLD=NEW",
+                     help="replace a path or name prefix in all exported text")
+    cht.add_argument("--max-chars", type=int, default=0, help="clip long texts (default 0: keep everything)")
+    cht.add_argument("--min-control-steps", type=int, default=1,
+                     help="skip rollouts with fewer act steps that show robot-control evidence (0 disables)")
+    cht.set_defaults(func=cmd_chat)
 
     val = sub.add_parser("validate", help="check an export")
     val.add_argument("out", type=Path)

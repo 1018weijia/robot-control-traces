@@ -1,0 +1,45 @@
+{
+  "schema": "robot-control-chat/v1",
+  "session": "2026-01-16_0199c0de",
+  "source": {
+    "rollout_file": "rollout-2026-01-16T14-00-00-0199c0de-0000-7000-8000-00000000c002.jsonl",
+    "rollout_sha256": "00a39dd4c7c1c39de12801425206f40dcad20d575b718996bc7de21589e0027b",
+    "thread_id": "0199c0de-0000-7000-8000-00000000c002",
+    "started_at": "2026-01-16T14:00:00.000Z",
+    "originator": "codex_cli_rs",
+    "cli_version": "0.99.0"
+  },
+  "agent": {
+    "models": [
+      "gpt-5-codex"
+    ],
+    "efforts": [
+      "high"
+    ]
+  },
+  "task": "Slide the red cube 5 cm to the right without tipping it, then send the arm home.",
+  "profiles": [
+    "default"
+  ],
+  "rounds": 4,
+  "final_round": true,
+  "counts": {
+    "task": 1,
+    "observation": 5,
+    "analysis": 8,
+    "action": 4,
+    "feedback": 4
+  },
+  "source_counts": {
+    "user_message": 1,
+    "image": 0,
+    "reasoning": 3,
+    "assistant_message": 2,
+    "compaction": 0,
+    "turn_aborted": 0,
+    "tool_call": 9,
+    "tool_output": 9,
+    "images": 4
+  },
+  "actions_without_feedback": []
+}

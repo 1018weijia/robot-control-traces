@@ -1,0 +1,46 @@
+{
+  "schema": "robot-control-chat/v1",
+  "session": "2026-01-15_0199c0de",
+  "source": {
+    "rollout_file": "rollout-2026-01-15T09-00-00-0199c0de-0000-7000-8000-00000000c001.jsonl",
+    "rollout_sha256": "6880e3d12ce9c64eee9094279868f1fae5f347a760dc72b364547aaeeeb05d52",
+    "thread_id": "0199c0de-0000-7000-8000-00000000c001",
+    "started_at": "2026-01-15T09:00:00.000Z",
+    "originator": "codex_cli_rs",
+    "cli_version": "0.99.0"
+  },
+  "agent": {
+    "models": [
+      "gpt-5-codex"
+    ],
+    "efforts": [
+      "high"
+    ]
+  },
+  "task": "Put the blue block into the bowl using tools/robot_ctl.py (session runs/demo_000).",
+  "profiles": [
+    "cell-queue",
+    "default"
+  ],
+  "rounds": 7,
+  "final_round": true,
+  "counts": {
+    "task": 2,
+    "observation": 13,
+    "analysis": 28,
+    "action": 7,
+    "feedback": 8
+  },
+  "source_counts": {
+    "user_message": 2,
+    "image": 0,
+    "reasoning": 7,
+    "assistant_message": 2,
+    "compaction": 0,
+    "turn_aborted": 0,
+    "tool_call": 21,
+    "tool_output": 21,
+    "images": 7
+  },
+  "actions_without_feedback": []
+}

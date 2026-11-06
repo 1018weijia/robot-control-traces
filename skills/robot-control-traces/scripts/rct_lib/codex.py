@@ -57,6 +57,13 @@ class Event:
     origin: str = "response_item"
     continuation_of: int | None = None
     process_session: str | None = None
+    # positions in the file (line numbers): seq follows time order, these keep a call apart from its output
+    raw: int = 0
+    output_raw: int | None = None
+    # write_stdin continuations are appended to output; own_* is what this call itself returned
+    continued: bool = False
+    own_output: str | None = None
+    own_exit_code: int | None = None
     # filled by later stages
     role: str | None = None
     rule: str | None = None
@@ -177,13 +184,18 @@ class _Builder:
         self.exec_end = {}
         self.view_paths = {}
         self.mcp_end = {}
+        self.end_lines = {}
         self.cwd = None
         self.seq = 0
 
+    @property
+    def line(self):
+        return self.stats["lines"]
+
     # ---- helpers ----------------------------------------------------------------------------------------------
-    def _event(self, kind, ts, **kw):
+    def _event(self, kind, ts, raw=None, **kw):
         self.seq += 1
-        event = Event(seq=self.seq, ts=ts, kind=kind, **kw)
+        event = Event(seq=self.seq, ts=ts, kind=kind, raw=self.line if raw is None else raw, **kw)
         self.events.append(event)
         return event
 
@@ -329,6 +341,7 @@ class _Builder:
             call.duration_s = duration if duration is not None else call.duration_s
             call.process_session = session or call.process_session
             call.end_ts = ts
+            call.output_raw = self.line if call.output_raw is None else call.output_raw
 
     def _call(self, kind, item, ts):
         name = item.get("name") or {"local_shell_call": "local_shell", "web_search_call": "web_search",
@@ -365,18 +378,20 @@ class _Builder:
         kind = msg.get("type")
         if kind == "user_message":
             images = [k for k in (self._image(url=u, source="user") for u in msg.get("images") or []) if k]
-            self.fallback["user_message"].append((ts, str(msg.get("message") or ""), images))
+            self.fallback["user_message"].append((ts, str(msg.get("message") or ""), images, self.line))
         elif kind == "agent_message":
-            self.fallback["agent_message"].append((ts, str(msg.get("message") or ""), msg.get("phase")))
+            self.fallback["agent_message"].append((ts, str(msg.get("message") or ""), msg.get("phase"), self.line))
         elif kind == "agent_reasoning":
-            self.fallback["agent_reasoning"].append((ts, str(msg.get("text") or "")))
+            self.fallback["agent_reasoning"].append((ts, str(msg.get("text") or ""), self.line))
         elif kind == "exec_command_end":
             self.exec_end[msg.get("call_id")] = msg
+            self.end_lines[msg.get("call_id")] = self.line
         elif kind == "view_image_tool_call":
             path = msg.get("path")
             self.view_paths[msg.get("call_id")] = path if isinstance(path, str) else json.dumps(path)
         elif kind == "mcp_tool_call_end":
             self.mcp_end[msg.get("call_id")] = msg
+            self.end_lines[msg.get("call_id")] = self.line
         elif kind == "turn_aborted":
             self._event("turn_aborted", ts, text=str(msg.get("reason") or ""))
         elif kind == "token_count" and isinstance(msg.get("info"), dict):
@@ -408,6 +423,10 @@ class _Builder:
             call = self.calls.get(call_id)
             if call is not None and call.output is None:
                 call.output = self._output(json.dumps(end.get("result"), ensure_ascii=False), call_id)[0]
+        for call_id, line in self.end_lines.items():
+            call = self.calls.get(call_id)
+            if call is not None and call.output_raw is None:
+                call.output_raw = line
         self._link_stdin()
         self.events.sort(key=lambda e: e.seq)
         turn = 0
@@ -430,15 +449,15 @@ class _Builder:
                 kept.append(event)
             self.events = kept
             known = {k for e in self.events for k in e.images}
-            for ts, text, images in events:
-                self._event("user_message", ts, text=text, images=[k for k in images if k not in known],
+            for ts, text, images, line in events:
+                self._event("user_message", ts, raw=line, text=text, images=[k for k in images if k not in known],
                             origin="event_msg")
         if not has["assistant_message"]:
-            for ts, text, phase in self.fallback["agent_message"]:
-                self._event("assistant_message", ts, text=text, phase=phase, origin="event_msg")
+            for ts, text, phase, line in self.fallback["agent_message"]:
+                self._event("assistant_message", ts, raw=line, text=text, phase=phase, origin="event_msg")
         if not has["reasoning"]:
-            for ts, text in self.fallback["agent_reasoning"]:
-                self._event("reasoning", ts, text=text, origin="event_msg")
+            for ts, text, line in self.fallback["agent_reasoning"]:
+                self._event("reasoning", ts, raw=line, text=text, origin="event_msg")
         if events or not has["assistant_message"] or not has["reasoning"]:
             self._resequence()
 
@@ -459,6 +478,9 @@ class _Builder:
                 origin = sessions.get(str(event.args.get("session_id")))
                 if origin is not None:
                     event.continuation_of = origin.seq
+                    if not origin.continued:
+                        origin.continued, origin.own_output, origin.own_exit_code = True, origin.output, \
+                            origin.exit_code
                     if event.output:
                         origin.output = (origin.output or "") + "\n" + event.output
                     if event.exit_code is not None:

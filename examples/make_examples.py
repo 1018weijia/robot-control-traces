@@ -5,6 +5,7 @@ input/codex_home/   two Codex rollouts (fictional robot sessions, written in the
 input/workspace/    the run directory one of them drove (cell-queue session: commands, responses, observations)
 output/             what `rct.py export` produces from them
 sft/                what `rct.py sft output` turns that export into (step-level training samples)
+chat/               what `rct.py chat` produces from the same rollouts (raw chat by decision round)
 
 Everything is generated here; no real conversation, robot or person is involved.
 """
@@ -362,13 +363,14 @@ def main():
     parser.add_argument("--out", type=Path, default=HERE, help="directory for input/ and output/ (default: examples/)")
     args = parser.parse_args()
     base = args.out.resolve()
-    for name in ("input", "output", "sft"):
+    for name in ("input", "output", "sft", "chat"):
         shutil.rmtree(base / name, ignore_errors=True)
     demo_cell_queue(base)
     demo_mcp(base)
     commands = [[sys.executable, str(RCT), "--codex-home", "input/codex_home", "export", "--auto", "--out", "output",
                  "--images", "all", "--remap-path", f"{RECORDED}=input/workspace"],
-                [sys.executable, str(RCT), "sft", "output", "--out", "sft"]]
+                [sys.executable, str(RCT), "sft", "output", "--out", "sft"],
+                [sys.executable, str(RCT), "--codex-home", "input/codex_home", "chat", "--auto", "--out", "chat"]]
     for command in commands:
         print("$ (cd", base, "&&", " ".join(command[1:]).replace(str(RCT), "rct.py") + ")", flush=True)
         code = subprocess.call(command, cwd=base)

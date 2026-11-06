@@ -18,7 +18,7 @@ from pathlib import Path
 import shutil
 
 from .redact import Redactor
-from .steps import clip
+from .steps import clip, written_texts
 
 SCHEMA = "robot-control-sft/v1"
 DATASET_NAME = "robot_control_sft"
@@ -83,8 +83,8 @@ def _first_line(texts, limit=160):
 
 
 def _analysis_texts(step):
-    analysis = step["analysis"]
-    return analysis["reasoning"] + analysis["messages"]
+    """What the agent wrote once the previous action's result was in, in written order."""
+    return written_texts(step["analysis"])[step["analysis"].get("waiting", 0):]
 
 
 def _summary(step):

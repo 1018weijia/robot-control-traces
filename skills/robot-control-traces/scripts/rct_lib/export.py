@@ -129,7 +129,7 @@ class Writer:
                 ref["file"], ref["file_sha256"] = f"images/{name}", digest
 
     def write_rollout(self, path, rollout, profile, episodes, final, report):
-        source = {"rollout_file": self.redactor.text(str(path)), "rollout_sha256": rollout.sha256,
+        source = {"rollout_file": path.name, "rollout_sha256": rollout.sha256,
                   "lines": rollout.stats.get("lines"), "warnings": len(rollout.warnings),
                   "profiles": profile.names, "episodes": []}
         base = unique_name(self.out / "episodes", rollout, "_00")
@@ -198,7 +198,7 @@ class Writer:
         self.manifest["sources"].append(source)
 
     def skip(self, path, reason, rollout=None):
-        self.manifest["sources"].append({"rollout_file": self.redactor.text(str(path)), "skipped": reason,
+        self.manifest["sources"].append({"rollout_file": path.name, "skipped": reason,
                                          "rollout_sha256": rollout.sha256 if rollout else None})
 
     def close(self):

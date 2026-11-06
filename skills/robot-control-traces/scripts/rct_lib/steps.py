@@ -202,9 +202,13 @@ def _typed_role(event, target, by_seq, profile):
 class _Buffer:
     def __init__(self):
         self.events = []
+        self.waiting = 0
 
     def of(self, *kinds, role=None):
         return [e for e in self.events if e.kind in kinds and (role is None or e.role == role)]
+
+    def texts(self):
+        return [e for e in self.of("reasoning", "assistant_message") if e.text]
 
 
 def image_ref(rollout, key, via):
@@ -252,6 +256,14 @@ def _texts(events):
     return [e.text for e in events if e.text]
 
 
+def written_texts(analysis):
+    """Reasoning and messages in the order the agent wrote them; reasoning first for exports without ``order``."""
+    order = analysis.get("order") or (["reasoning"] * len(analysis["reasoning"])
+                                      + ["messages"] * len(analysis["messages"]))
+    lists = {"reasoning": iter(analysis["reasoning"]), "messages": iter(analysis["messages"])}
+    return [next(lists[name]) for name in order]
+
+
 def make_step(rollout, act, buffer, profile, limit, previous):
     observe = buffer.of("tool_call", role="observe")
     images = []
@@ -272,6 +284,8 @@ def make_step(rollout, act, buffer, profile, limit, previous):
                         "prior_feedback": prior, "state": None},
         "analysis": {"reasoning": _texts(buffer.of("reasoning")),
                      "messages": _texts(buffer.of("assistant_message")),
+                     "order": ["reasoning" if e.kind == "reasoning" else "messages" for e in buffer.texts()],
+                     "waiting": buffer.waiting,
                      "rationale": rationale(observe, "observe", profile) + rationale([act], "act", profile),
                      "code_comments": [], "user_messages": _texts(buffer.of("user_message"))},
         "action": {"tool": act.tool, "signature": act.signature, "rule": act.rule,
@@ -309,6 +323,7 @@ def segment(rollout, profile, limit=4000):
             steps[-1]["outcome"]["results"].append(record)
             steps[-1]["outcome"]["images"] += [image_ref(rollout, k, event.signature) for k in event.images]
             steps[-1]["_results"] = steps[-1].get("_results", []) + [event]
+            buffer.waiting = len(buffer.texts())
         elif event.kind == "tool_call" and event.role == "ignore":
             continue
         else:

@@ -306,10 +306,12 @@ class GenericExportTests(unittest.TestCase):
             errors, totals = export([path], Path(tmp) / "out")
             self.assertEqual(errors, [])
             (steps,) = steps_of(Path(tmp) / "out")
+            manifest = json.loads((Path(tmp) / "out" / "manifest.json").read_text())
             episode = json.loads(next((Path(tmp) / "out" / "episodes").iterdir()).joinpath("episode.json").read_text())
             blob = (Path(tmp) / "out").joinpath("episodes").glob("*/*.json*")
             text = "".join(p.read_text() for p in blob)
         self.assertEqual(len(steps), 4)
+        self.assertEqual([s["rollout_file"] for s in manifest["sources"]], [path.name])
         first, second, third, fourth = steps
         self.assertEqual(first["observation"]["images"][0]["file"][:7], "images/")
         self.assertEqual(first["analysis"]["reasoning"], ["cup at right front; approach from behind"])
@@ -358,6 +360,22 @@ class GenericExportTests(unittest.TestCase):
             folders = sorted(p.name for p in (Path(tmp) / "out" / "episodes").iterdir())
         self.assertEqual(errors, [])
         self.assertEqual(folders, ["2026-11-04_00000000_00", "2026-11-04_00000000_2_00"])
+
+    def test_scan_prints_paths_for_detail(self):
+        rct = ROOT / "skills" / "robot-control-traces" / "scripts" / "rct.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.build(tmp)
+            scan = subprocess.run([sys.executable, str(rct), "scan", "--codex-home", tmp],
+                                  capture_output=True, text=True)
+        self.assertEqual(scan.returncode, 0, scan.stderr)
+        self.assertIn(str(path), scan.stdout.split())
+
+    def test_validate_refuses_other_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "manifest.json").write_text(json.dumps({"schema": "something-else/v1", "episodes": []}))
+            errors, _, _ = validate(tmp)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("not a step export", errors[0])
 
 
 class ControlEvidenceTests(unittest.TestCase):
@@ -532,7 +550,9 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(len(images), 3)
         for secret in ("/home/alice", "SECRET SYSTEM PROMPT", "environment_context", "permissions instructions"):
             self.assertNotIn(secret, text)
-        self.assertEqual(manifest["sessions"][0]["rounds"], 4)
+        entry = manifest["sessions"][0]
+        self.assertEqual((entry["rounds"], entry["final_round"]), (3, True))
+        self.assertEqual((session["rounds"], session["final_round"]), (3, True))
 
     def test_images_stay_with_their_content(self):
         photo, head, wrist, head2, wrist2 = (png((1, 2, 3)), png((10, 0, 0)), png((0, 10, 0)), png((20, 0, 0)),
@@ -729,10 +749,18 @@ class ChatTests(unittest.TestCase):
             run = [sys.executable, str(rct), "chat", "--rollout", str(path), "--out", str(out)]
             first = subprocess.run(run, capture_output=True, text=True)
             again = subprocess.run(run, capture_output=True, text=True)
+            valid = subprocess.run([sys.executable, str(rct), "validate", str(out)], capture_output=True, text=True)
+            image = next((out / "sessions").glob("*/images/*"))
+            image.write_bytes(b"changed")
+            broken = subprocess.run([sys.executable, str(rct), "validate", str(out)], capture_output=True, text=True)
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertIn("check: 0 error(s)", first.stdout)
         self.assertNotEqual(again.returncode, 0)
         self.assertIn("not empty", again.stderr)
+        self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+        self.assertIn("check: 0 error(s)", valid.stdout)
+        self.assertEqual(broken.returncode, 1)
+        self.assertIn("does not match its content", broken.stdout)
 
 
 class SftTests(unittest.TestCase):
@@ -765,6 +793,44 @@ class SftTests(unittest.TestCase):
         self.assertIn("Traceback: blocked", third["messages"][1]["content"])
         self.assertEqual(len(fourth["images"]), 1)
         self.assertTrue(all(r["meta"]["control"] for r in rows))
+
+    def test_analysis_in_written_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().user("go")
+            b.reasoning("need a closer look")
+            b.assistant("Checking the wrist camera.")
+            b.view_image("/home/alice/run/cam_wrist.png", png((4, 5, 6)))
+            b.reasoning("cup is 1.5 cm left")
+            b.shell("robot_cli move_to --x 0.1", "ok")
+            path = b.write(Path(tmp) / "r.jsonl")
+            export([path], Path(tmp) / "out")
+            (steps,) = steps_of(Path(tmp) / "out")
+            sft_mod.build(Path(tmp) / "out", Path(tmp) / "sft", sft_mod.SftOptions())
+            (row,) = [json.loads(l) for l in (Path(tmp) / "sft" / "train.jsonl").read_text().splitlines()]
+            report = next((Path(tmp) / "out" / "episodes").glob("*/episode.md")).read_text()
+        self.assertEqual(steps[0]["analysis"]["order"], ["reasoning", "messages", "reasoning"])
+        self.assertTrue(row["messages"][2]["content"].startswith(
+            "need a closer look\nChecking the wrist camera.\ncup is 1.5 cm left\n\n"))
+        self.assertLess(report.index("Checking the wrist camera."), report.index("cup is 1.5 cm left"))
+
+    def test_text_written_while_waiting_is_not_a_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().user("go")
+            b.shell("robot_cli move_to --x 0.1", "moving", style="running")
+            b.assistant("Waiting for the move to finish.")
+            b.stdin(7, "reached")
+            b.reasoning("arm reached; close the gripper")
+            b.shell("robot_cli set_gripper --width 0.02", "closed")
+            path = b.write(Path(tmp) / "r.jsonl")
+            export([path], Path(tmp) / "out")
+            (steps,) = steps_of(Path(tmp) / "out")
+            sft_mod.build(Path(tmp) / "out", Path(tmp) / "sft", sft_mod.SftOptions())
+            rows = [json.loads(l) for l in (Path(tmp) / "sft" / "train.jsonl").read_text().splitlines()]
+        self.assertEqual((steps[1]["analysis"]["order"], steps[1]["analysis"]["waiting"]), (["messages", "reasoning"], 1))
+        self.assertEqual(steps[1]["analysis"]["messages"], ["Waiting for the move to finish."])
+        target = rows[1]["messages"][2]["content"]
+        self.assertTrue(target.startswith("arm reached; close the gripper\n\n"))
+        self.assertNotIn("Waiting for the move", target)
 
     def test_filters(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -6,7 +6,7 @@
   rct.py export --auto --out DIR                  export every rollout found by scan
   rct.py export --rollout R1 R2 --out DIR         export specific rollouts
   rct.py chat --rollout R1 R2 --out DIR           raw chat by decision round, every piece labelled (or --auto)
-  rct.py validate DIR                             schema check, coverage, privacy scan and a redacted sample
+  rct.py validate DIR                             re-check an export or chat export, with a privacy scan
   rct.py sft DIR --out SFT_DIR                    step-level training samples (LLaMA-Factory sharegpt layout)
   rct.py audit PATH...                            privacy scan of any dataset files, including third-party ones
   rct.py profiles                                 list built-in profiles
@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 import sys
 
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from rct_lib import audit, chat as chat_mod, codex, export as export_mod, profile as profile_mod  # noqa: E402
@@ -93,8 +94,8 @@ def cmd_scan(args):
             print(f"  ERROR {s['rollout']}: {s['error']}")
             continue
         print(f"  {(s['started'] or '')[:19]:<19}  act {s['act']:>4}  observe {s['observe']:>4}  "
-              f"images {s['images']:>4}  {','.join(s['models'])[:24]:<24}  {Path(s['rollout']).name}\n"
-              f"      profiles {s['profiles']}  top act: {s['top_act']}")
+              f"images {s['images']:>4}  {','.join(s['models'])[:24]}\n"
+              f"      profiles {s['profiles']}  top act: {s['top_act']}\n      {s['rollout']}")
     return 0
 
 
@@ -145,17 +146,28 @@ def cmd_chat(args):
                                min_control_steps=args.min_control_steps)
     manifest = chat_mod.export(paths, args.out, options, overwrite=args.overwrite)
     written = [s for s in manifest["sessions"] if "id" in s]
-    print(f"wrote {len(written)} session(s), {sum(s['rounds'] for s in written)} round line(s) from {len(paths)} "
-          f"rollout(s) to {args.out}; skipped {len(manifest['sessions']) - len(written)}")
+    print(f"wrote {len(written)} session(s), {sum(s['rounds'] for s in written)} round(s) with actions from "
+          f"{len(paths)} rollout(s) to {args.out}; skipped {len(manifest['sessions']) - len(written)}")
     check = manifest["check"]
-    print(f"check: {check['errors']} error(s)")
-    for error in check["first"]:
+    return _chat_report(args.out, check["errors"], check["first"])
+
+
+def _chat_report(out, count, errors):
+    print(f"check: {count} error(s)")
+    for error in errors:
         print(f"  {error}")
-    print(audit.format_findings(audit.scan([args.out])))
-    return 1 if check["errors"] else 0
+    print(audit.format_findings(audit.scan([out])))
+    return 1 if count else 0
 
 
 def cmd_validate(args):
+    try:
+        schema = json.loads((args.out / "manifest.json").read_text(encoding="utf-8")).get("schema")
+    except (OSError, ValueError, AttributeError):
+        schema = None
+    if schema == chat_mod.MANIFEST_SCHEMA:
+        errors = chat_mod.check(args.out)
+        return _chat_report(args.out, len(errors), errors[:50])
     errors, totals, samples = validate(args.out)
     print(format_report(errors, totals, samples))
     return 1 if errors else 0

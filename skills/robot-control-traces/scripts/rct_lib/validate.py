@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from . import audit
+from .export import MANIFEST_SCHEMA
 from .steps import SCHEMA
 
 STEP_FIELDS = {"schema": str, "episode_id": str, "step_index": int, "time": dict, "turn": int,
@@ -35,6 +36,8 @@ def validate(out):
         manifest = json.loads((out / "manifest.json").read_text())
     except (OSError, ValueError) as exc:
         return [f"manifest.json: {exc}"], {}, []
+    if manifest.get("schema") != MANIFEST_SCHEMA:
+        return [f"manifest.json: schema {manifest.get('schema')!r}, not a step export"], {}, []
     for entry in manifest.get("episodes", []):
         folder = out / "episodes" / entry["id"]
         try:

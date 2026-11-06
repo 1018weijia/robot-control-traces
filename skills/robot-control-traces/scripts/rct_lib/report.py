@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 
+from .steps import written_texts
 
 FIRST_KEYS = ("stdout", "stderr", "error", "message", "result", "output")
 
@@ -119,7 +120,7 @@ def _step(step):
     out += ["", "### Analysis", ""]
     for text in analysis["user_messages"]:
         out += [_quote("User: " + text), ""]
-    for text in analysis["reasoning"] + analysis["messages"]:
+    for text in written_texts(analysis):
         out += [_quote(text), ""]
     out += [f"- {r['key'].lstrip('-')}: {r['text']}" for r in analysis["rationale"]]
     out += [f"- code comment: {c}" for c in analysis["code_comments"]]

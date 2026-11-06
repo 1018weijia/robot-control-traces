@@ -3,7 +3,7 @@
 ```
 OUT/
   manifest.json                      export options, sources, episode list, redaction counts
-  episodes/<date>_<thread8>_<NN>/
+  episodes/<date>_<thread8>_<NN>/    <date>_<thread8>_2_<NN>, … when two sessions share date and id prefix
     episode.json                     source, agent, task, profile, stats, final turn, adapter info
     episode.md                       readable report of the steps (observation, analysis, action, outcome)
     steps.jsonl                      one JSON object per act call (the dataset)
@@ -49,6 +49,9 @@ rollout. Timestamps are ISO 8601 UTC strings from the rollout. All text is redac
 
 - `reasoning[]`: reasoning summaries Codex stored for this span.
 - `messages[]`: assistant messages (commentary) in this span.
+- `order[]`: `"reasoning"` / `"messages"` per text, in the order they were written (`episode.md` and SFT follow it).
+- `waiting`: how many of those texts, in that order, were written before the last result of the previous action
+  arrived (polling a running command or an asynchronous submit); SFT targets leave them out.
 - `rationale[]`: `{source: observe|act, signature, key, text}` from rationale options (`--note`, `--evidence`, …)
   or rationale keys in MCP arguments (`reason`, `intent`, …).
 - `code_comments[]`: comments in the executed Python code.
@@ -119,8 +122,9 @@ One normalized event per line, null fields dropped: `seq`, `ts`, `turn`, `kind` 
 ## manifest.json
 
 `schema` (`robot-control-trace-manifest/v1`), `generator{name, version}`, `created_at`, `options` (redacted; custom
-redaction and remap paths are only counted), `sources[]` (`rollout_file`, `rollout_sha256`, `lines`, `warnings`, `profiles`, `episodes[]`, or
-`skipped` with the reason, e.g. too few act steps or no robot-control evidence), `episodes[]` (`id` = folder name,
+redaction and remap paths are only counted), `sources[]` (`rollout_file` (file name), `rollout_sha256`, `lines`,
+`warnings`, `profiles`, `episodes[]`, or `skipped` with the reason, e.g. too few act steps, no robot-control
+evidence or "copy of <file>"), `episodes[]` (`id` = folder name,
 `steps`, `rollout`), `redaction{enabled, counts, custom_paths}`. Redaction count kinds: `home_path`, `volume_path`,
 `private_ip`, `email`, `custom_path`, `secret_field` (a JSON field such as `"api_key"`) and one per secret pattern
 (`assignment`, `bearer`, `openai_key`, …). Token counts (`max_tokens`) and placeholders (`$API_KEY`, `...`,
@@ -150,7 +154,8 @@ A `train.jsonl` row:
   last `--history` steps: signature, control calls, why, ok/failed and result), `Result of your last action`,
   `User:` messages of this span (not repeated when equal to the task), and `Current observation:` with one
   `<camera or image N>: <image>` line per image (latest `--max-images`), reads and adapter state. The assistant
-  turn is the reasoning and messages of the span, then the action: the executed file
+  turn is the reasoning and messages of the span in written order (without those written while waiting for the
+  previous result), then the action: the executed file
   (`` File `path`: ```python``` ``) when the code is not inline, then the command in a `bash` block, or the
   tool and its arguments in a `json` block. A literal `<image>` in recorded text is written as `< image>`.
 - `images`: paths relative to the SFT directory, one per `<image>` placeholder, in order.
@@ -166,12 +171,13 @@ cut at export, so the target would be incomplete). Text is redacted again when s
 ```
 CHAT/
   manifest.json                 schema, created_at, options, sessions (id, rollout_file, rollout_sha256, rounds,
-                                actions; or skipped with the reason, e.g. "copy of <file>"), redaction,
-                                check {errors, first}
-  sessions/<date>_<thread8>/
+                                final_round, actions; or skipped with the reason, e.g. "copy of <file>"),
+                                redaction, check {errors, first}
+  sessions/<date>_<thread8>/    _2, _3, … appended when two sessions share date and id prefix
     rounds.jsonl                one decision round per line
     session.json                schema, session, source (with parent_thread_id for a forked session), agent, task,
-                                profiles, rounds, final_round, counts, source_counts,
+                                profiles, rounds (rounds with actions), final_round (a "final" line follows),
+                                counts, source_counts,
                                 actions_without_feedback [{call_id, reason}]
     images/<sha256[:16]>.<ext>  images the model received
 ```
@@ -184,7 +190,8 @@ sits where the model received it (after other calls issued in parallel, after re
 A round ends with the last feedback of its actions: actions issued before any of them returned share a round, and
 waiting, polling and `write_stdin` for a running action stay in it.
 
-Each event has `seq` (session-wide, increasing), `category`, `ts`, and depending on the category:
+Each event has `seq` (session-wide, increasing; a rationale entry shares its call's), `category`, `ts`, and
+depending on the category:
 
 | category | from | fields |
 |---|---|---|
@@ -214,7 +221,8 @@ recording lacks (a remote URL, a broken data URL) and of every image with `--ima
 - When a tool output has text after an image (`"head:"`, image, `"wrist:"`, image), the record also has `parts`:
   `[{"text": ...}, {"image": ...}, ...]` in recorded order. `text` and `images` hold the same content.
 
-`check` (run after writing, result in the manifest, non-zero exit on errors): `seq` increases; each rationale entry
+`check` (run after writing, result in the manifest, non-zero exit on errors; `rct.py validate CHAT` runs it
+again): `seq` increases; each rationale entry
 is followed by its call; each feedback's `action` is an action of the same round; each action has feedback or is
 listed in `actions_without_feedback`; every image file exists and its hash matches the name; `parts` and `images`
 list the same images; per kind (user messages, reasoning, assistant messages, tool calls, tool outputs, images,
@@ -233,7 +241,9 @@ for ep in sorted(pathlib.Path("traces/episodes").iterdir()):
     for line in (ep / "steps.jsonl").open():
         step = json.loads(line)
         frames = [ep / i["file"] for i in step["observation"]["images"] if i["file"]]
-        text = step["analysis"]["reasoning"] + [r["text"] for r in step["analysis"]["rationale"]]
+        analysis = step["analysis"]
+        written = iter(analysis["reasoning"]), iter(analysis["messages"])
+        text = [next(written[name == "messages"]) for name in analysis["order"]]
         action = step["action"]["code"] or step["action"]["command"] or step["action"]["args"]
 
 for session in sorted(pathlib.Path("chat/sessions").iterdir()):

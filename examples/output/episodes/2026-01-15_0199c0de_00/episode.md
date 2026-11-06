@@ -277,9 +277,9 @@ observation.image_sha256.cam_wrist: ff74f6ea72bb25e9f6ba5e0aaec13aee0636a9573d59
 
 ### Analysis
 
-> Block is centred above the bowl; lower it inside and release.
-
 > Submitted asynchronously; polling for the result.
+
+> Block is centred above the bowl; lower it inside and release.
 
 - note: ack step 5
 - evidence: Wrist: block centred over the bowl, about 10 cm above the rim.

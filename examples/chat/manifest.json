@@ -4,7 +4,7 @@
     "name": "robot-control-traces",
     "version": "0.3.0"
   },
-  "created_at": "2026-11-06T03:10:25+00:00",
+  "created_at": "2026-11-06T06:50:53+00:00",
   "options": {
     "profiles": [],
     "auto_profiles": true,
@@ -18,14 +18,16 @@
       "id": "2026-01-15_0199c0de",
       "rollout_file": "rollout-2026-01-15T09-00-00-0199c0de-0000-7000-8000-00000000c001.jsonl",
       "rollout_sha256": "6880e3d12ce9c64eee9094279868f1fae5f347a760dc72b364547aaeeeb05d52",
-      "rounds": 8,
+      "rounds": 7,
+      "final_round": true,
       "actions": 7
     },
     {
       "id": "2026-01-16_0199c0de",
       "rollout_file": "rollout-2026-01-16T14-00-00-0199c0de-0000-7000-8000-00000000c002.jsonl",
       "rollout_sha256": "00a39dd4c7c1c39de12801425206f40dcad20d575b718996bc7de21589e0027b",
-      "rounds": 5,
+      "rounds": 4,
+      "final_round": true,
       "actions": 4
     }
   ],

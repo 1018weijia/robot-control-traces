@@ -75,7 +75,7 @@ $RCT scan --detail ~/.codex/sessions/2026/01/15/rollout-....jsonl   # role of ev
 $RCT export --auto --since 2026-01-01 --out traces/                 # write + validate
 $RCT export --rollout a.jsonl --profile my_framework.json --out traces/
 $RCT export --auto --out traces/ --remap-path /old/runs=/data/runs  # run directories moved since recording
-$RCT validate traces/
+$RCT validate traces/                       # re-check an export (a chat export too)
 $RCT sft traces/ --out sft/                 # one training sample per action (LLaMA-Factory sharegpt layout)
 $RCT chat --auto --out chat/                # the raw conversation, labelled and grouped by decision round
 $RCT audit sft/ some_other_dataset/         # privacy scan of any JSON / JSONL / Markdown / TSV files
@@ -111,7 +111,8 @@ sft/
 
 Each sample is one decision: the user turn holds the task, a one-line summary of the last `--history` steps, the
 result of the previous action and the current observation (`<image>` placeholders, state reads, user messages);
-the assistant turn is the recorded analysis followed by the exact command or code. Long episodes therefore stay
+the assistant turn is the analysis recorded after that result, in written order, followed by the exact command or
+code. Long episodes therefore stay
 within normal context lengths instead of becoming one sample of hundreds of images. Failed actions are kept as
 targets by default (their failure is shown in the next prompt); `--drop-failed` and `--success-only` filter them.
 
@@ -172,14 +173,15 @@ output is current. No Codex installation is needed.
 `rct.py scan --detail` 查看每类调用被判成什么角色，判错了就写一个 JSON profile（见 `reference/profiles.md`）。
 文件队列式（cell-queue）会话会自动和运行目录对齐，补充原生动作区间、primitive 调用、观测状态和成功标签。
 只有含机器人控制证据的 rollout 才会导出，子 agent、GitHub、文件系统等工具调用不算控制。
-`rct.py sft` 把导出结果转成按步的训练样本（每个动作一条，LLaMA-Factory sharegpt 格式，带 `<image>` 占位），
+`rct.py sft` 把导出结果转成按步的训练样本（每个动作一条，LLaMA-Factory sharegpt 格式，带 `<image>` 占位；
+目标是上一步结果返回之后写下的分析，按书写顺序，再加上原样的命令或代码），
 `rct.py chat` 原样导出聊天记录，不做任何改写（只去掉终端颜色码和进度条重绘，同一会话的副本只导出一次）：
 每条内容标上类别（任务、观测、分析、动作、反馈、其他；向运行中的 REPL 输入的命令也算动作），
 按决策轮次分组，一轮一行。一轮从上一轮的最后一条反馈之后开始，到本轮动作的最后一条反馈为止，所以某个动作之前看过的图、
 做过的分析，这个动作本身，以及它的返回都在同一行里。动作和反馈用同一个 `call_id` 对应，异步取回的结果用 `action`
 指回原动作。图像跟着它到达时所在的那条内容走，顺序与记录一致：工具返回的图在该调用上，用户发的图在该条用户消息上，
 记录里没有图像数据的位置写 `null`。导出后会读回文件逐项核对（顺序、配对、图像哈希、内容不丢不重），并把每个图像引用
-与原始 rollout 文件逐一比对，有错误时命令返回非零。
+与原始 rollout 文件逐一比对，有错误时命令返回非零；之后可以用 `rct.py validate` 重新核对。
 `rct.py audit` 可以对任意数据集（包括别的工具转换的）做隐私扫描。默认开启脱敏（home 路径、外接卷名、内网 IP、
 邮箱、密钥），从不读取 `auth.json`。
 

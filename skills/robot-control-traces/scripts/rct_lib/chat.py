@@ -419,7 +419,7 @@ def export(paths, out, options: Options, overwrite=False, log=print):
         lines, groups = Session(folder, rollout, profile, options).write(redactor)
         image_errors += [f"{folder.name}: {e}" for e in crosscheck(path, folder, options.images != "none")]
         manifest["sessions"].append({"id": folder.name, "rollout_file": path.name, "rollout_sha256": rollout.sha256,
-                                     "rounds": lines, "actions": acts})
+                                     "rounds": groups, "final_round": lines > groups, "actions": acts})
         log(f"{path.name}: {groups} round(s) with actions, {lines - groups} final")
     manifest["redaction"] = {"enabled": options.redact, "counts": redactor.counts,
                              "custom_paths": len(options.path_map)}

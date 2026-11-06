@@ -126,8 +126,9 @@ chat/
     images/                     frames the model received, named by content hash
 ```
 
-Every piece of the rollout appears once, verbatim, in file order, labelled `task`, `observation`, `analysis`,
-`action`, `feedback` or `other`. A round runs from the end of the previous round to the last feedback of its own
+Every piece of the rollout appears once, verbatim (terminal colour codes and progress-bar redraws removed), in file
+order, labelled `task`, `observation`, `analysis`, `action`, `feedback` or `other`; a command typed into a running
+REPL or robot shell is an `action` of its own. A copy of a session that is also selected is skipped. A round runs from the end of the previous round to the last feedback of its own
 actions, so the images and reasoning an action was based on, the action and what it returned are on one line.
 An action and its feedback share a `call_id`; feedback fetched later (`write_stdin`, a poll command) names its
 action in `action`; `--note` / `--evidence` values and MCP `reason` arguments are repeated as `analysis` entries
@@ -172,7 +173,8 @@ output is current. No Codex installation is needed.
 文件队列式（cell-queue）会话会自动和运行目录对齐，补充原生动作区间、primitive 调用、观测状态和成功标签。
 只有含机器人控制证据的 rollout 才会导出，子 agent、GitHub、文件系统等工具调用不算控制。
 `rct.py sft` 把导出结果转成按步的训练样本（每个动作一条，LLaMA-Factory sharegpt 格式，带 `<image>` 占位），
-`rct.py chat` 原样导出聊天记录，不做任何改写：每条内容标上类别（任务、观测、分析、动作、反馈、其他），
+`rct.py chat` 原样导出聊天记录，不做任何改写（只去掉终端颜色码和进度条重绘，同一会话的副本只导出一次）：
+每条内容标上类别（任务、观测、分析、动作、反馈、其他；向运行中的 REPL 输入的命令也算动作），
 按决策轮次分组，一轮一行。一轮从上一轮的最后一条反馈之后开始，到本轮动作的最后一条反馈为止，所以某个动作之前看过的图、
 做过的分析，这个动作本身，以及它的返回都在同一行里。动作和反馈用同一个 `call_id` 对应，异步取回的结果用 `action`
 指回原动作。图像跟着它到达时所在的那条内容走，顺序与记录一致：工具返回的图在该调用上，用户发的图在该条用户消息上，

@@ -26,8 +26,8 @@ SESSION_ID_RE = re.compile(r"[Ss]ession ID[:\s]+(\d+)")
 EXIT_RE = re.compile(r"(?:Process exited with code|Exit code:)\s*(-?\d+)")
 WALL_RE = re.compile(r"Wall time:\s*([\d.]+)\s*s")
 VIEW_FAILED_RE = re.compile(r"(?i)\b(unable|error|failed|not found|no such|cannot|denied|invalid)\b")
-MODEL_ITEMS = {"reasoning", "function_call", "custom_tool_call", "local_shell_call", "web_search_call",
-               "tool_search_call"}
+CALL_ITEMS = ("function_call", "custom_tool_call", "local_shell_call", "web_search_call", "tool_search_call")
+MODEL_ITEMS = {"reasoning", *CALL_ITEMS}
 
 
 @dataclasses.dataclass
@@ -166,13 +166,75 @@ def decode_data_url(url: str):
     return mime, data
 
 
-def _parse_json(text):
+def parse_json(text):
     if isinstance(text, str) and text[:1] in "{[":
         try:
             return json.loads(text)
         except ValueError:
             return None
     return None
+
+
+def image_url(item):
+    """The URL of an image content item; MCP image items carry base64 ``data`` and a ``mimeType`` instead."""
+    url = item.get("image_url")
+    if isinstance(url, dict):
+        url = url.get("url")
+    if url is None and isinstance(item.get("data"), str):
+        url = f"data:{item.get('mimeType') or 'image/png'};base64,{item['data']}"
+    return url
+
+
+def mcp_result(value):
+    """True for an MCP tool result of text and image items, which older CLIs recorded as a JSON string."""
+    items = value.get("content") if isinstance(value, dict) else value
+    return isinstance(items, list) and bool(items) and all(
+        isinstance(i, dict) and i.get("type") in ("text", "image") for i in items)
+
+
+def typed_input(event):
+    """True when a write_stdin call types text into the process; an empty write only polls it."""
+    chars = event.args.get("chars") if isinstance(event.args, dict) else None
+    return isinstance(chars, str) and bool(chars.strip())
+
+
+def copies(paths):
+    """{path: original} for rollouts whose complete lines are the start of another rollout of the same session: an
+    identical file, or a copy taken while the session was still running. The longest file is the original."""
+    sessions = {}
+    for path in dict.fromkeys(map(Path, paths)):
+        sessions.setdefault(_session_id(path), []).append(path)
+    found = {}
+    for group in sessions.values():
+        if len(group) < 2:
+            continue
+        data = {path: path.read_bytes() for path in group}
+        group.sort(key=lambda p: -len(data[p]))
+        for index, path in enumerate(group):
+            body = data[path]
+            body = body if body.endswith(b"\n") else body[:body.rfind(b"\n") + 1]
+            original = next((p for p in group[:index] if p not in found and data[p].startswith(body)), None)
+            if body and original is not None:
+                found[path] = original
+    return found
+
+
+def _session_id(path):
+    try:
+        with open(path, "rb") as handle:
+            line = next((l for l in handle if l.strip()), b"")
+    except OSError:
+        return path  # compared with nothing; the export reports the file when it reads it
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(record, dict):
+        return None
+    if record.get("type") == "session_meta" and isinstance(record.get("payload"), dict):
+        meta = record["payload"].get("meta", record["payload"])
+        return meta.get("id") or meta.get("session_id") if isinstance(meta, dict) else None
+    return record.get("id") if "type" not in record else None
 
 
 class _Builder:
@@ -237,10 +299,7 @@ class _Builder:
                 if parts is not None:
                     parts.append(("text", texts[-1]))
             elif kind in ("input_image", "image", "image_url") or "image_url" in item or "file_id" in item:
-                url = item.get("image_url")
-                if isinstance(url, dict):
-                    url = url.get("url")
-                key = self._image(url=url, file_id=item.get("file_id"), source=source, call_id=call_id)
+                key = self._image(url=image_url(item), file_id=item.get("file_id"), source=source, call_id=call_id)
                 if key:
                     images.append(key)
                     if parts is not None:
@@ -253,11 +312,14 @@ class _Builder:
         """Tool output → (text, image keys, exit code, duration, running process session id, parts)."""
         exit_code = duration = session = None
         images, parts = [], []
+        call = self.calls.get(call_id)
+        if isinstance(output, str) and call is not None and call.command is None and mcp_result(parse_json(output)):
+            output = json.loads(output)
         if isinstance(output, dict):
             if "content_items" in output:
                 output = output["content_items"]
             else:
-                if output.get("success") is False:
+                if output.get("success") is False or output.get("isError") is True:
                     exit_code = 1
                 output = output.get("content", json.dumps(output, ensure_ascii=False))
         if isinstance(output, list):
@@ -268,7 +330,7 @@ class _Builder:
         kinds = [kind for kind, _ in parts]
         if "image" in kinds and "text" in kinds[kinds.index("image"):]:
             return text, images, exit_code, duration, session, parts
-        parsed = _parse_json(text)
+        parsed = parse_json(text)
         if isinstance(parsed, dict) and "output" in parsed and isinstance(parsed.get("metadata"), dict):
             meta = parsed["metadata"]
             text = str(parsed["output"])
@@ -309,7 +371,7 @@ class _Builder:
         elif kind == "event_msg":
             self._event_msg(payload, ts)
         elif kind == "compacted":
-            self._event("compaction", ts, text=str(payload.get("message") or "")[:4000])
+            self._event("compaction", ts, text=str(payload.get("message") or ""))
 
     def _response_item(self, item, ts):
         kind = item.get("type")
@@ -346,7 +408,7 @@ class _Builder:
             text = "\n\n".join(t.strip() for t in summary + raw if t.strip())
             if text:
                 self._event("reasoning", ts, text=text)
-        elif kind in ("function_call", "custom_tool_call", "local_shell_call", "web_search_call", "tool_search_call"):
+        elif kind in CALL_ITEMS:
             self._call(kind, item, ts)
         elif kind in ("function_call_output", "custom_tool_call_output", "tool_search_output"):
             call = self.calls.get(item.get("call_id"))
@@ -373,7 +435,7 @@ class _Builder:
             name = f"{item['namespace']}.{name}"
         if kind == "function_call":
             raw = item.get("arguments")
-            args = _parse_json(raw) if isinstance(raw, str) else raw
+            args = parse_json(raw) if isinstance(raw, str) else raw
             args = raw if args is None else args
         elif kind == "custom_tool_call":
             args = item.get("input")
@@ -405,8 +467,11 @@ class _Builder:
     def _event_msg(self, msg, ts):
         kind = msg.get("type")
         if kind == "user_message":
+            text = str(msg.get("message") or "")
+            if msg.get("kind") not in (None, "plain") or text.startswith(CONTEXT_PREFIXES):
+                return  # context an older CLI also wrote as a typed message
             images = [k for k in (self._image(url=u, source="user") for u in msg.get("images") or []) if k]
-            self.fallback["user_message"].append((ts, str(msg.get("message") or ""), images, self.line))
+            self.fallback["user_message"].append((ts, text, images, self.line))
         elif kind == "agent_message":
             self.fallback["agent_message"].append((ts, str(msg.get("message") or ""), msg.get("phase"), self.line))
         elif kind == "agent_reasoning":
@@ -449,8 +514,17 @@ class _Builder:
                     self.images[key].path_hint = self.images[key].path_hint or hint
         for call_id, end in self.mcp_end.items():
             call = self.calls.get(call_id)
-            if call is not None and call.output is None:
-                call.output = self._output(json.dumps(end.get("result"), ensure_ascii=False), call_id)[0]
+            if call is None or call.output is not None:
+                continue
+            result = end.get("result")
+            failed = isinstance(result, dict) and "Err" in result
+            if isinstance(result, dict) and ("Ok" in result or failed):
+                result = result.get("Err") if failed else result["Ok"]
+            if not isinstance(result, (dict, list)):
+                result = "" if result is None else str(result)
+            call.output, images, exit_code, *_ = self._output(result, call_id)
+            call.images += images
+            call.exit_code = 1 if failed else exit_code
         for call_id, line in self.end_lines.items():
             call = self.calls.get(call_id)
             if call is not None and call.output_raw is None:
@@ -514,24 +588,31 @@ class _Builder:
             event.seq = index
 
     def _link_stdin(self):
-        sessions = {}
+        """write_stdin continues a running process. Typed input is a call of its own; an empty write polls the
+        process, and what it returns is appended to the latest call that gave the process input."""
+        current = {}
         for event in sorted(self.events, key=lambda e: e.seq):
             if event.kind != "tool_call":
                 continue
             base = (event.tool or "").split(".")[-1]
             if base == "write_stdin" and isinstance(event.args, dict):
-                origin = sessions.get(str(event.args.get("session_id")))
-                if origin is not None:
-                    event.continuation_of = origin.seq
-                    if not origin.continued:
-                        origin.continued, origin.own_output, origin.own_exit_code = True, origin.output, \
-                            origin.exit_code
-                    if event.output:
-                        origin.output = (origin.output or "") + "\n" + event.output
-                    if event.exit_code is not None:
-                        origin.exit_code = event.exit_code
+                key = str(event.args.get("session_id"))
+                target = current.get(key)
+                if target is None:
+                    continue
+                event.continuation_of = target.seq
+                if typed_input(event):
+                    current[key] = event
+                    continue
+                if not target.continued:
+                    target.continued, target.own_output, target.own_exit_code = True, target.output, \
+                        target.exit_code
+                if event.output:
+                    target.output = (target.output or "") + "\n" + event.output
+                if event.exit_code is not None:
+                    target.exit_code = event.exit_code
             elif event.process_session:
-                sessions[event.process_session] = event
+                current[event.process_session] = event
 
 
 def _adjacent(candidates, used, line, positions):

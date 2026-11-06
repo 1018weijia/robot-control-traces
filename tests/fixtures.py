@@ -55,11 +55,18 @@ class RolloutBuilder:
         self.n += 1
         return f"call_{self.n:03d}"
 
-    def context(self):
+    def context(self, mirrored=False):
+        """``mirrored``: also write the context as typed user messages, as older CLIs did (with or without a kind)."""
+        environment = "<environment_context>\n  <cwd>/home/alice</cwd>\n</environment_context>"
         self._line("response_item", {"type": "message", "role": "developer",
                                      "content": [{"type": "input_text", "text": "<permissions instructions>x"}]})
         self._line("response_item", {"type": "message", "role": "user", "content": [
-            {"type": "input_text", "text": "<environment_context>\n  <cwd>/home/alice</cwd>\n</environment_context>"}]})
+            {"type": "input_text", "text": environment}]})
+        if mirrored:
+            self._line("event_msg", {"type": "user_message", "message": environment, "kind": "environment_context",
+                                     "images": []})
+            self._line("event_msg", {"type": "user_message", "images": [],
+                                     "message": "<user_instructions>\n# AGENTS.md: never push\n</user_instructions>"})
         return self
 
     def user(self, text, image=None, url=None):
@@ -100,7 +107,7 @@ class RolloutBuilder:
         self._line("event_msg", {"type": "agent_message", "message": text})
         return self
 
-    def shell(self, cmd, output="", exit_code=0, tool="exec_command", workdir=None, style="unified"):
+    def shell(self, cmd, output="", exit_code=0, tool="exec_command", workdir=None, style="unified", session=7):
         cid = self.call_id()
         args = {"cmd": cmd} if tool == "exec_command" else {"command": ["bash", "-lc", cmd]}
         if workdir:
@@ -110,7 +117,7 @@ class RolloutBuilder:
         if style == "json":
             text = json.dumps({"output": output, "metadata": {"exit_code": exit_code, "duration_seconds": 0.4}})
         elif style == "running":
-            text = f"Chunk ID: a1\nWall time: 1.0 seconds\nProcess running with session ID 7\nOutput:\n{output}"
+            text = f"Chunk ID: a1\nWall time: 1.0 seconds\nProcess running with session ID {session}\nOutput:\n{output}"
         else:
             text = (f"Chunk ID: a1\nWall time: 0.4 seconds\nProcess exited with code {exit_code}\n"
                     f"Original token count: 10\nOutput:\n{output}")
@@ -119,7 +126,7 @@ class RolloutBuilder:
                                  "parsed_cmd": [], "aggregated_output": output, "exit_code": exit_code,
                                  "duration": {"secs": 0, "nanos": 400}, "status": "completed"}
                    if style != "running" else {"type": "token_count", "info": None})
-        self._line("response_item", {"type": "function_call_output", "call_id": cid, "output": text})
+        self.raw_output(cid, text)
         return cid
 
     def call(self, cmd):
@@ -131,20 +138,16 @@ class RolloutBuilder:
 
     def output(self, cid, output, exit_code=0, image=None):
         text = f"Wall time: 0.4 seconds\nProcess exited with code {exit_code}\nOutput:\n{output}"
-        if image is None:
-            self._line("response_item", {"type": "function_call_output", "call_id": cid, "output": text})
-        else:
-            self._line("response_item", {"type": "function_call_output", "call_id": cid, "output": [
-                {"type": "input_text", "text": text}, {"type": "input_image", "image_url": data_url(image)}]})
-        return self
+        return self.raw_output(cid, text if image is None else [
+            {"type": "input_text", "text": text}, {"type": "input_image", "image_url": data_url(image)}])
 
-    def stdin(self, session_id, output, exit_code=0):
+    def stdin(self, session_id, output, exit_code=0, chars="", running=False):
+        """``chars``: text typed into the running process (empty polls it); ``running``: it is still running after."""
         cid = self.call_id()
         self._line("response_item", {"type": "function_call", "name": "write_stdin", "call_id": cid,
-                                     "arguments": json.dumps({"session_id": session_id, "chars": ""})})
-        self._line("response_item", {"type": "function_call_output", "call_id": cid,
-                                     "output": f"Wall time: 2.0 seconds\nProcess exited with code {exit_code}\n"
-                                               f"Output:\n{output}"})
+                                     "arguments": json.dumps({"session_id": session_id, "chars": chars})})
+        state = f"Process running with session ID {session_id}" if running else f"Process exited with code {exit_code}"
+        self.raw_output(cid, f"Wall time: 2.0 seconds\n{state}\nOutput:\n{output}")
         return cid
 
     def view_image(self, path, data, inline=True):
@@ -161,8 +164,10 @@ class RolloutBuilder:
                 {"type": "input_image", "image_url": data_url(data)}]})
         return cid
 
-    def mcp(self, name, args, output="ok", image=None, namespace=None, parts=None):
-        """``parts``: output content in order, str for text and bytes for an image."""
+    def mcp(self, name, args, output="ok", image=None, namespace=None, parts=None, native=None):
+        """``parts``: output content in order, str for text and bytes for an image. ``native``: write the MCP result
+        itself ({"type": "image", "data", "mimeType"} items), as older CLIs did: "text" as a JSON string, "object" as
+        an object, "event" only in the mcp_tool_call_end event."""
         cid = self.call_id()
         item = {"type": "function_call", "name": name, "arguments": json.dumps(args), "call_id": cid}
         if namespace:
@@ -174,7 +179,17 @@ class RolloutBuilder:
         if parts is not None:
             items = [{"type": "input_text", "text": p} if isinstance(p, str) else
                      {"type": "input_image", "image_url": data_url(p)} for p in parts]
-        self._line("response_item", {"type": "function_call_output", "call_id": cid, "output": items})
+        if native:
+            content = [{"type": "text", "text": i["text"]} if i["type"] == "input_text" else
+                       {"type": "image", "data": i["image_url"].split(",", 1)[1], "mimeType": "image/png"}
+                       for i in items]
+            if native == "event":
+                self._line("event_msg", {"type": "mcp_tool_call_end", "call_id": cid,
+                                         "result": {"Ok": {"content": content}}})
+                return cid
+            result = {"content": content, "isError": False}
+            items = json.dumps(result) if native == "text" else result
+        self.raw_output(cid, items)
         return cid
 
     def apply_patch(self, patch):

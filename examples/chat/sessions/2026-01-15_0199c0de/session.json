@@ -5,6 +5,7 @@
     "rollout_file": "rollout-2026-01-15T09-00-00-0199c0de-0000-7000-8000-00000000c001.jsonl",
     "rollout_sha256": "6880e3d12ce9c64eee9094279868f1fae5f347a760dc72b364547aaeeeb05d52",
     "thread_id": "0199c0de-0000-7000-8000-00000000c001",
+    "parent_thread_id": null,
     "started_at": "2026-01-15T09:00:00.000Z",
     "originator": "codex_cli_rs",
     "cli_version": "0.99.0"

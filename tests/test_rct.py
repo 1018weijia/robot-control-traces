@@ -10,7 +10,7 @@ import tempfile
 import unittest
 import uuid
 
-from fixtures import RolloutBuilder, SessionBuilder, T0, png
+from fixtures import ROOT, RolloutBuilder, SessionBuilder, T0, png
 
 from rct_lib import audit, calls, codex, shell
 from rct_lib import chat as chat_mod
@@ -175,6 +175,29 @@ class ReaderTests(unittest.TestCase):
         self.assertLess(ls.raw, ls.output_raw)
         self.assertFalse(first.continued)
 
+    def test_mirrored_context_is_not_typed_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().context(mirrored=True).user("go")
+            rollout = codex.read_rollout(b.write(Path(tmp) / "r.jsonl"))
+        self.assertEqual([e.text for e in rollout.events if e.kind == "user_message"], ["go"])
+
+    def test_mcp_images_in_native_format(self):
+        frames = [png((i, 0, 0)) for i in (1, 2, 3)]
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().user("look")
+            for frame, native in zip(frames, ("text", "object", "event")):
+                b.mcp("get_camera", {}, "head", image=frame, namespace="mcp__robot", native=native)
+            rollout = codex.read_rollout(b.write(Path(tmp) / "r.jsonl"))
+        cams = [e for e in rollout.events if e.kind == "tool_call"]
+        self.assertEqual([(c.output, c.images) for c in cams], [("head", [sha(f)]) for f in frames])
+        self.assertEqual([rollout.images[sha(f)].data for f in frames], frames)
+
+    def test_long_compaction_summary_is_whole(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().user("go").compact("s" * 6000)
+            rollout = codex.read_rollout(b.write(Path(tmp) / "r.jsonl"))
+        self.assertEqual([len(e.text) for e in rollout.events if e.kind == "compaction"], [6000])
+
 
 class ShellTests(unittest.TestCase):
     def test_heredoc_write_and_skeleton(self):
@@ -324,6 +347,18 @@ class GenericExportTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(steps[1]["action"]["adjustments"][0]["changes"]["--angle"]["delta"], 2.0)
 
+    def test_sessions_with_the_same_id_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for n in (1, 2):  # uuid7 ids of sessions started within a minute share their first 8 characters
+                b = RolloutBuilder(thread=str(uuid.UUID(int=n))).user("go")
+                b.shell(f"robot_cli move_to --x 0.{n}", "ok")
+                paths.append(b.write(Path(tmp) / f"r{n}.jsonl"))
+            errors, _ = export(paths, Path(tmp) / "out")
+            folders = sorted(p.name for p in (Path(tmp) / "out" / "episodes").iterdir())
+        self.assertEqual(errors, [])
+        self.assertEqual(folders, ["2026-11-04_00000000_00", "2026-11-04_00000000_2_00"])
+
 
 class ControlEvidenceTests(unittest.TestCase):
     """Failure modes seen in a published dataset built with this exporter."""
@@ -370,6 +405,56 @@ class ControlEvidenceTests(unittest.TestCase):
         self.assertEqual(second["observation"]["reads"][0]["signature"], "mcp__robot.zoom_head")
         self.assertEqual(second["action"]["adjustments"][0]["changes"]["left.target_point"]["delta"], [6, 0])
         self.assertTrue(first["flags"]["control"])
+
+
+class InteractiveInputTests(unittest.TestCase):
+    """write_stdin with nothing typed polls a running command; typed text is a call of its own."""
+
+    def test_command_typed_into_a_robot_shell(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().user("move from the robot shell")
+            shell_id = b.shell("robot_cli repl", "robot> ", style="running")
+            typed = b.stdin(7, "robot> moving", chars="move_to 0.3 0.1 0.2\n", running=True)
+            poll = b.stdin(7, "robot> reached", running=True)
+            path = b.write(Path(tmp) / "r.jsonl")
+            out = Path(tmp) / "chat"
+            manifest = chat_mod.export([path], out, chat_mod.Options(), log=lambda *_: None)
+            lines = [json.loads(l) for l in next((out / "sessions").iterdir()).joinpath("rounds.jsonl").read_text()
+                     .splitlines()]
+        self.assertEqual(manifest["check"]["errors"], 0)
+        self.assertEqual([l["actions"] for l in lines], [[shell_id], [typed]])
+        records = {(e["call_id"], e["category"]): e for l in lines for e in l["events"] if "call_id" in e}
+        self.assertEqual(records[typed, "action"]["args"]["chars"], "move_to 0.3 0.1 0.2\n")
+        self.assertEqual(records[typed, "feedback"]["text"], "robot> moving")
+        self.assertEqual((records[poll, "feedback"]["action"], records[poll, "feedback"]["text"]),
+                         (typed, "robot> reached"))
+        self.assertEqual(records[shell_id, "feedback"]["text"], "robot> ")
+
+    def test_robot_calls_typed_into_a_python_repl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().user("move from python")
+            b.shell("python3 -i", ">>> ", style="running", session=9)
+            b.stdin(9, "moving", chars="robo.move_to([0.2, 0, 0.3])\n", running=True)
+            b.stdin(9, "reached", running=True)
+            path = b.write(Path(tmp) / "r.jsonl")
+            errors, _ = export([path], Path(tmp) / "out")
+            (steps,) = steps_of(Path(tmp) / "out")
+        self.assertEqual(errors, [])
+        (step,) = steps
+        self.assertEqual((step["action"]["tool"], step["action"]["code"]), ("write_stdin", "robo.move_to([0.2, 0, 0.3])\n"))
+        self.assertEqual([c["func"] for c in step["action"]["calls"]], ["robo.move_to"])
+        self.assertTrue(step["flags"]["control"])
+        self.assertEqual(step["outcome"]["output"], "moving\nreached")
+
+    def test_polled_output_is_written_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().user("go")
+            b.shell("python -c 'import robo; robo.move_to([0.2, 0, 0.3])'", "starting", style="running")
+            b.stdin(7, "done: reached")
+            errors, _ = export([b.write(Path(tmp) / "r.jsonl")], Path(tmp) / "out")
+            text = next((Path(tmp) / "out" / "episodes").iterdir()).joinpath("steps.jsonl").read_text()
+        self.assertEqual(errors, [])
+        self.assertEqual(text.count("done: reached"), 1)
 
 
 class ChatTests(unittest.TestCase):
@@ -436,7 +521,7 @@ class ChatTests(unittest.TestCase):
         self.assertTrue(rounds[2]["context_reset"])
         self.assertFalse(rounds[1]["context_reset"])
         self.assertEqual(third[1]["kind"], "compaction")
-        self.assertEqual(third[2]["code"], "import robo; robo.move_to([0.2, 0, 0.3])")
+        self.assertNotIn("code", third[2], "inline code is already in the command")
         self.assertEqual((third[3]["text"], third[5]["text"], third[5]["tool"]), ("starting", "done: reached",
                                                                                  "write_stdin"))
         self.assertEqual(third[5]["action"], third[2]["call_id"])
@@ -511,6 +596,143 @@ class ChatTests(unittest.TestCase):
         self.assertTrue(any("does not match its content" in e for e in errors), errors)
         self.assertTrue(any("without feedback" in e for e in errors), errors)
         self.assertTrue(any("tool_output" in e for e in errors), errors)
+
+    def events(self, out):
+        return [e for r in self.rounds(out)[1] for e in r["events"]]
+
+    def test_code_from_an_earlier_file_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().user("go")
+            b.shell("cat > /tmp/cell.py <<'EOF'\nimport robo\nrobo.move_to([0.2, 0, 0.3])\nEOF", "")
+            b.shell("python /tmp/cell.py", "moved")
+            out, _ = self.export(tmp, [b.write(Path(tmp) / "r.jsonl")])
+            (act,) = [e for e in self.events(out) if e["category"] == "action"]
+        self.assertEqual((act["command"], act["code"]), ("python /tmp/cell.py",
+                                                         "import robo\nrobo.move_to([0.2, 0, 0.3])\n"))
+
+    def test_terminal_control_characters_are_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().user("go")
+            b.shell("robot_cli move_to --x 0.1", "\x1b[32mok\x1b[0m\n" + "".join(f"\r{i}%" for i in (0, 50, 100)))
+            out, _ = self.export(tmp, [b.write(Path(tmp) / "r.jsonl")])
+            (feedback,) = [e for e in self.events(out) if e["category"] == "feedback"]
+        self.assertEqual(feedback["text"], "ok\n100%")
+
+    def test_native_mcp_images_are_checked(self):
+        frame = png((4, 4, 4))
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().user("look")
+            cam = b.mcp("get_camera", {}, "head", image=frame, namespace="mcp__robot", native="text")
+            b.shell("robot_cli move_to --x 0.1", "ok")
+            path = b.write(Path(tmp) / "r.jsonl")
+            out, manifest = self.export(tmp, [path])
+            folder, rounds = self.rounds(out)
+            record = next(e for e in rounds[0]["events"] if e.get("call_id") == cam)
+            seen = dict(record)
+            record["images"] = []
+            (folder / "rounds.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rounds))
+            dropped = chat_mod.crosscheck(path, folder)
+        self.assertEqual(manifest["check"]["errors"], 0)
+        self.assertEqual((seen["text"], seen["images"]), ("head", [ref(frame)]))
+        self.assertTrue(any(cam in e for e in dropped), dropped)
+
+    def test_copies_are_exported_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.build(tmp)
+            lines = path.read_text().splitlines(keepends=True)
+            early = Path(tmp) / "early.jsonl"
+            early.write_text("".join(lines[:12]) + lines[12][:30])  # copied while the session was still running
+            same = Path(tmp) / "same.jsonl"
+            same.write_bytes(path.read_bytes())
+            out, manifest = self.export(tmp, [early, path, same])
+            steps = export_mod.export([early, path, same], Path(tmp) / "steps", export_mod.Options(),
+                                      log=lambda *_: None)
+        self.assertEqual([s.get("id") is not None for s in manifest["sessions"]], [False, True, False])
+        self.assertEqual({s.get("skipped") for s in manifest["sessions"] if "skipped" in s}, {f"copy of {path.name}"})
+        self.assertEqual(manifest["check"]["errors"], 0)
+        self.assertEqual(len({e["rollout"] for e in steps["episodes"]}), 1)
+
+    def test_missing_rollout_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gone = Path(tmp) / "gone.jsonl"
+            out, manifest = self.export(tmp, [gone, self.build(tmp)])
+            steps = export_mod.export([gone], Path(tmp) / "steps", export_mod.Options(), log=lambda *_: None)
+        self.assertIn("parse error", manifest["sessions"][0]["skipped"])
+        self.assertEqual(manifest["check"]["errors"], 0)
+        self.assertIn("parse error", steps["sources"][0]["skipped"])
+
+    def test_without_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, manifest = self.export(tmp, [self.build(tmp)], images="none")
+            refs = [r for e in self.events(out) for r in e.get("images", [])]
+            saved = list(out.rglob("images"))
+        self.assertEqual(manifest["check"]["errors"], 0)
+        self.assertEqual((len(refs), set(refs), saved), (3, {None}, []))
+
+    def test_max_chars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().user("go")
+            b.shell("robot_cli status", "x" * 500)
+            out, manifest = self.export(tmp, [b.write(Path(tmp) / "r.jsonl")], max_chars=100)
+            (feedback,) = [e for e in self.events(out) if e["category"] == "feedback"]
+        self.assertEqual(manifest["check"]["errors"], 0)
+        self.assertIn("400 chars cut", feedback["text"])
+        self.assertLess(len(feedback["text"]), 130)
+
+    def test_poll_and_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().user("pour")
+            b.shell("python robot_ctl.py ack_visual --camera cam_head --evidence 'cup on the right'", "acked")
+            act = b.shell("python robot_ctl.py --async --note 'tilt' cell --file /tmp/c.py", '{"pending": true}')
+            poll = b.shell("python robot_ctl.py poll --id 1", '{"done": true}')
+            out, manifest = self.export(tmp, [b.write(Path(tmp) / "r.jsonl")])
+            events = self.events(out)
+        self.assertEqual(manifest["check"]["errors"], 0)
+        self.assertEqual([(e["category"], e.get("kind")) for e in events],
+                         [("task", None), ("analysis", "--evidence"), ("observation", None), ("analysis", "--note"),
+                          ("action", None), ("feedback", None), ("feedback", None)])
+        self.assertEqual((events[1]["text"], events[1]["call_id"]), ("cup on the right", events[2]["call_id"]))
+        self.assertEqual((events[6]["call_id"], events[6]["action"], events[6]["text"]), (poll, act, '{"done": true}'))
+
+    def test_feedback_after_the_next_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = RolloutBuilder().user("go")
+            slow = b.shell("python -c 'import robo; robo.move_to([0.2, 0, 0.3])'", "starting", style="running")
+            fast = b.shell("robot_cli set_gripper --width 0.02", "closed")
+            b.stdin(7, "done: reached")
+            out, manifest = self.export(tmp, [b.write(Path(tmp) / "r.jsonl")])
+            folder, rounds = self.rounds(out)
+        self.assertEqual(manifest["check"]["errors"], 0)
+        self.assertEqual([r["actions"] for r in rounds], [[slow, fast]])
+        self.assertEqual([(e.get("text"), e.get("action")) for e in rounds[0]["events"] if e["category"] == "feedback"],
+                         [("starting", slow), ("closed", fast), ("done: reached", slow)])
+
+    def test_output_directory_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.build(tmp)
+            out, _ = self.export(tmp, [path])
+            with self.assertRaises(SystemExit):
+                chat_mod.export([path], out, chat_mod.Options(), log=lambda *_: None)
+            chat_mod.export([path], out, chat_mod.Options(), overwrite=True, log=lambda *_: None)
+            with self.assertRaises(SystemExit):
+                export_mod.export([path], out, export_mod.Options(), overwrite=True, log=lambda *_: None)
+            steps = Path(tmp) / "steps"
+            export_mod.export([path], steps, export_mod.Options(), log=lambda *_: None)
+            with self.assertRaises(SystemExit):
+                chat_mod.export([path], steps, chat_mod.Options(), overwrite=True, log=lambda *_: None)
+            self.assertEqual(chat_mod.check(out), [])
+
+    def test_command_line(self):
+        rct = ROOT / "skills" / "robot-control-traces" / "scripts" / "rct.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            path, out = self.build(tmp), Path(tmp) / "chat"
+            run = [sys.executable, str(rct), "chat", "--rollout", str(path), "--out", str(out)]
+            first = subprocess.run(run, capture_output=True, text=True)
+            again = subprocess.run(run, capture_output=True, text=True)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertIn("check: 0 error(s)", first.stdout)
+        self.assertNotEqual(again.returncode, 0)
+        self.assertIn("not empty", again.stderr)
 
 
 class SftTests(unittest.TestCase):

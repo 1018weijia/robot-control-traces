@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
-import shutil
 
 from . import codex, export as export_mod, steps as steps_mod
 from .redact import Redactor
@@ -23,6 +22,7 @@ MANIFEST_SCHEMA = "robot-control-chat-manifest/v1"
 ROLE_CATEGORY = {"act": "action", "observe": "observation", "result": "feedback"}
 MESSAGE_KIND = {"user_message": ("task", None), "image": ("observation", "user_image"),
                 "reasoning": ("analysis", "reasoning"), "assistant_message": ("analysis", "message")}
+COUNTED = ("user_message", "image", "reasoning", "assistant_message", "compaction", "turn_aborted")
 NO_OUTPUT = "no output in the recording"
 
 
@@ -90,8 +90,7 @@ def rounds(ordered):
 def source_counts(rollout):
     """What the recording holds, counted straight from the parsed rollout; check() compares the export with it."""
     events, calls = rollout.events, [e for e in rollout.events if e.kind == "tool_call"]
-    counts = {kind: sum(1 for e in events if e.kind == kind) for kind in
-              ("user_message", "image", "reasoning", "assistant_message", "compaction", "turn_aborted")}
+    counts = {kind: sum(1 for e in events if e.kind == kind) for kind in COUNTED}
     counts.update(tool_call=len(calls), tool_output=sum(1 for e in calls if e.output_raw is not None),
                   images=sum(len(e.images) for e in events))
     return counts
@@ -102,8 +101,7 @@ def _is_rationale(record):
 
 
 def _exported_counts(records):
-    counts = dict.fromkeys(("user_message", "image", "reasoning", "assistant_message", "compaction", "turn_aborted",
-                            "tool_call", "tool_output", "images"), 0)
+    counts = dict.fromkeys(COUNTED + ("tool_call", "tool_output", "images"), 0)
     kinds = {"user_image": "image", "reasoning": "reasoning", "message": "assistant_message",
              "compaction": "compaction", "turn_aborted": "turn_aborted"}
     for record in records:
@@ -125,7 +123,7 @@ class Session:
         self.folder, self.rollout, self.profile, self.options = folder, rollout, profile, options
 
     def text(self, value):
-        return steps_mod.clip(value, self.options.max_chars) if self.options.max_chars else value
+        return steps_mod.clip(value, self.options.max_chars)
 
     def image(self, key):
         """images/<sha256[:16]>.<ext>, or None when the recording holds no bytes (or --images none)."""
@@ -163,7 +161,8 @@ class Session:
                 record["command"] = event.command
             else:
                 record["args"] = event.args
-            if piece.part == "call" and event.code:
+            if piece.part == "call" and event.code and event.command is not None \
+                    and event.code.strip() not in event.command:
                 record["code"] = event.code
         if piece.action is not None:
             record["action"] = piece.action.call_id
@@ -210,7 +209,9 @@ class Session:
         session = {
             "schema": SCHEMA, "session": self.folder.name,
             "source": {"rollout_file": rollout.path.name, "rollout_sha256": rollout.sha256,
-                       "thread_id": rollout.thread_id, "started_at": rollout.started,
+                       "thread_id": rollout.thread_id,
+                       "parent_thread_id": rollout.meta.get("parent_thread_id") or rollout.meta.get("forked_from_id"),
+                       "started_at": rollout.started,
                        "originator": rollout.meta.get("originator"), "cli_version": rollout.meta.get("cli_version")},
             "agent": {"models": rollout.models,
                       "efforts": sorted({c.get("effort") for c in rollout.turn_contexts if c.get("effort")})},
@@ -270,10 +271,10 @@ def check_session(folder):
     return errors
 
 
-def check(out):
+def check(out, manifest=None):
     """Read the export back and verify order, pairing, images and that every recorded piece appears exactly once."""
     out = Path(out)
-    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    manifest = manifest or json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     errors = []
     for entry in manifest["sessions"]:
         if "id" in entry:
@@ -296,17 +297,17 @@ def _raw_keys(value):
         return []
     if value.get("file_id"):
         return ["file:" + str(value["file_id"])]
-    url = value.get("image_url")
-    url = url.get("url") if isinstance(url, dict) else url
+    url = codex.image_url(value) if "image_url" in value or value.get("type") == "image" else None
     if isinstance(url, str) and url:
         return [_raw_key(url)]
     return [k for v in value.values() for k in _raw_keys(v)]
 
 
 def raw_images(path):
-    """Read straight from the rollout file, without the reader: the images of each tool output by call_id, the images
-    of user-role messages in file order, and the images event_msg user messages list."""
-    calls, user, typed = {}, [], set()
+    """Read straight from the rollout file, without the reader: the images of each tool output by call_id (an MCP
+    result recorded as a JSON string, or only in its end event, included), the images of user-role messages in file
+    order, and the images event_msg user messages list."""
+    calls, user, typed, ends = {}, [], set(), {}
     for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             record = json.loads(line)
@@ -319,11 +320,18 @@ def raw_images(path):
             continue
         if kind == "response_item" and item.get("type") in ("function_call_output", "custom_tool_call_output",
                                                              "tool_search_output"):
-            calls.setdefault(item.get("call_id"), []).extend(_raw_keys(item.get("output")))
+            output = item.get("output")
+            if isinstance(output, str) and codex.mcp_result(codex.parse_json(output)):
+                output = json.loads(output)
+            calls.setdefault(item.get("call_id"), []).extend(_raw_keys(output))
         elif kind == "response_item" and item.get("type") == "message" and item.get("role") == "user":
             user += _raw_keys(item.get("content"))
         elif kind == "event_msg" and item.get("type") == "user_message":
             typed.update(_raw_key(u) for u in item.get("images") or [] if isinstance(u, str) and u)
+        elif kind == "event_msg" and item.get("type") == "mcp_tool_call_end":
+            ends[item.get("call_id")] = _raw_keys(item.get("result"))
+    for call_id, keys in ends.items():
+        calls.setdefault(call_id, keys)
     return calls, user, typed
 
 
@@ -375,32 +383,9 @@ def crosscheck(rollout_path, folder, saved=True):
     return errors
 
 
-def prepare_out(out: Path, overwrite: bool):
-    if out.exists() and any(out.iterdir()):
-        if not overwrite:
-            raise SystemExit(f"{out} is not empty; choose a new directory or pass --overwrite")
-        manifest = out / "manifest.json"
-        if not manifest.exists() or json.loads(manifest.read_text()).get("schema") != MANIFEST_SCHEMA:
-            raise SystemExit(f"refusing to overwrite {out}: it does not look like a previous chat export")
-        shutil.rmtree(out / "sessions", ignore_errors=True)
-        manifest.unlink()
-    out.mkdir(parents=True, exist_ok=True)
-
-
-def _folder(out, rollout):
-    date = (rollout.started or "")[:10] or "undated"
-    base = f"{date}_{rollout.thread_id.replace('-', '')[:8]}"
-    folder, n = out / "sessions" / base, 1
-    while folder.exists():
-        n += 1
-        folder = out / "sessions" / f"{base}_{n}"
-    folder.mkdir(parents=True)
-    return folder
-
-
 def export(paths, out, options: Options, overwrite=False, log=print):
     out = Path(out)
-    prepare_out(out, overwrite)
+    export_mod.prepare_out(out, overwrite, "sessions", MANIFEST_SCHEMA)
     redactor = Redactor(options.redact, options.path_map)
     settings = {k: v for k, v in dataclasses.asdict(options).items() if k != "path_map"}
     manifest = {"schema": MANIFEST_SCHEMA, "generator": {"name": "robot-control-traces", "version": export_mod.VERSION},
@@ -409,7 +394,13 @@ def export(paths, out, options: Options, overwrite=False, log=print):
     gate = export_mod.Options(profiles=options.profiles, auto_profiles=options.auto_profiles,
                               images="none" if options.images == "none" else "seen", use_adapters=False)
     image_errors = []
-    for path in map(Path, paths):
+    paths = list(dict.fromkeys(map(Path, paths)))
+    copies = codex.copies(paths)
+    for path in paths:
+        if path in copies:
+            manifest["sessions"].append({"rollout_file": path.name, "skipped": f"copy of {copies[path].name}"})
+            log(f"skip {path.name}: copy of {copies[path].name}")
+            continue
         try:
             rollout, profile, episodes, _, _ = export_mod.analyse(path, gate)
         except Exception as exc:  # one broken rollout must not stop a batch
@@ -423,7 +414,8 @@ def export(paths, out, options: Options, overwrite=False, log=print):
                                          "skipped": f"no robot-control evidence: {control} of {acts} act steps"})
             log(f"skip {path.name}: {acts} act steps but {control} with robot-control evidence")
             continue
-        folder = _folder(out, rollout)
+        folder = out / "sessions" / export_mod.unique_name(out / "sessions", rollout)
+        folder.mkdir(parents=True)
         lines, groups = Session(folder, rollout, profile, options).write(redactor)
         image_errors += [f"{folder.name}: {e}" for e in crosscheck(path, folder, options.images != "none")]
         manifest["sessions"].append({"id": folder.name, "rollout_file": path.name, "rollout_sha256": rollout.sha256,
@@ -431,14 +423,9 @@ def export(paths, out, options: Options, overwrite=False, log=print):
         log(f"{path.name}: {groups} round(s) with actions, {lines - groups} final")
     manifest["redaction"] = {"enabled": options.redact, "counts": redactor.counts,
                              "custom_paths": len(options.path_map)}
-    _write_manifest(out, manifest)
-    errors = check(out) + image_errors
+    errors = check(out, manifest) + image_errors
     manifest["check"] = {"errors": len(errors), "first": errors[:20]}
-    _write_manifest(out, manifest)
-    return manifest
-
-
-def _write_manifest(out, manifest):
     with open(out / "manifest.json", "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
+    return manifest

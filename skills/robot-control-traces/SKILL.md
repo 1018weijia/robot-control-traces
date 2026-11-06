@@ -28,7 +28,9 @@ written earlier in the transcript), the extracted control calls with literal arg
 against the previous step with the same call. The outcome holds output, exit code and images returned.
 
 Roles come from profiles: explicit `--profile`, then auto-detected built-ins (`cell-queue`), then `default`
-keyword heuristics. Unmatched calls are `aux`.
+keyword heuristics. Unmatched calls are `aux`. Text typed into a running process (`write_stdin` with `chars`) is
+classified like a command; typed text no rule knows is an `act` when an act call started the process, while an empty
+`write_stdin` polls and is the `result` of the latest input.
 
 An act step has `flags.control` when it is evidence of robot control: matched by a non-default profile, by a robot
 MCP server / ROS / robot CLI rule, or code with extracted control calls. Generic `default` matches (an MCP tool
@@ -91,7 +93,8 @@ run-directory frames), `--redact-path /data/acme=<data>`, `--max-chars 4000` (ou
 `--read-local-files` (read code files missing from the transcript from disk; their current content may differ),
 `--remap-path RECORDED=LOCAL` (run directories copied or moved since the session), `--min-act-steps N`,
 `--min-control-steps N` (default 1; 0 keeps rollouts without control evidence), `--overwrite` (only replaces a
-previous export).
+previous export of the same kind). A selected rollout whose content is the start of another rollout of the same
+session (an identical file, or a copy taken while it was running) is skipped as a copy.
 
 **5. Validate.** Export runs validation automatically; `RCT validate traces/` re-runs it. It checks the schema,
 step order, adjustment references and image hashes, runs a privacy scan, then prints coverage and sample steps. Then
@@ -115,8 +118,8 @@ long sessions hold hundreds of images and far exceed usual cutoffs.
 
 **6b. Raw chat.** When the user wants the conversation itself rather than reshaped steps:
 `RCT chat --auto --out chat/` (or `--rollout ...`; same `--profile`, `--redact-path`, `--min-control-steps`). It
-writes `sessions/<id>/rounds.jsonl`, one decision round per line: every piece of the rollout verbatim, in file
-order, labelled `task` / `observation` / `analysis` / `action` / `feedback` / `other`, where a round ends with the
+writes `sessions/<id>/rounds.jsonl`, one decision round per line: every piece of the rollout verbatim (terminal
+colour codes and progress-bar redraws removed), in file order, labelled `task` / `observation` / `analysis` / `action` / `feedback` / `other`, where a round ends with the
 last feedback of its actions. Actions and feedback share `call_id`; late results carry `action`. The export is read
 back and checked (order, pairing, image hashes, every recorded piece exactly once); fix any reported error before
 using the data. Open one `rounds.jsonl` and confirm the analysis before each action is about the images before it.

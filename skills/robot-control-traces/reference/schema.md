@@ -80,7 +80,8 @@ rollout. Timestamps are ISO 8601 UTC strings from the rollout. All text is redac
 
 `output` (ANSI codes and carriage-return progress removed, clipped to `--max-chars` keeping head and tail),
 `output_chars` and `output_sha256` (of the raw output), `exit_code`, `duration_s`, `images[]` (returned by the act
-call), `results[]` (`result`-role calls such as polling, same format as `observation.reads`).
+call), `results[]` (`result`-role calls such as polling, same format as `observation.reads`; a `write_stdin` poll
+has `output: null` because its output is appended to the output of the call it polled).
 
 ### enrichment.cell_queue
 
@@ -165,11 +166,13 @@ cut at export, so the target would be incomplete). Text is redacted again when s
 ```
 CHAT/
   manifest.json                 schema, created_at, options, sessions (id, rollout_file, rollout_sha256, rounds,
-                                actions; or skipped with the reason), redaction, check {errors, first}
+                                actions; or skipped with the reason, e.g. "copy of <file>"), redaction,
+                                check {errors, first}
   sessions/<date>_<thread8>/
     rounds.jsonl                one decision round per line
-    session.json                schema, session, source, agent, task, profiles, rounds, final_round, counts,
-                                source_counts, actions_without_feedback [{call_id, reason}]
+    session.json                schema, session, source (with parent_thread_id for a forked session), agent, task,
+                                profiles, rounds, final_round, counts, source_counts,
+                                actions_without_feedback [{call_id, reason}]
     images/<sha256[:16]>.<ext>  images the model received
 ```
 
@@ -188,14 +191,16 @@ Each event has `seq` (session-wide, increasing), `category`, `ts`, and depending
 | `task` | user messages (the first is the task, later ones are interjections) with the images sent with them | `text`, `images` |
 | `observation` | observe calls with their output; image-only user-role messages no call claims (`kind: user_image`) | `call_id`, `tool`, `command` or `args`, `text`, `exit_code`, `images`, `parts` |
 | `analysis` | reasoning summaries (`kind: reasoning`), assistant messages (`kind: message`, `phase`); rationale values of a call (`kind`: the option or argument name, plus `call_id`) | `text` |
-| `action` | act calls | `call_id`, `tool`, `command` or `args`, `code` (recovered from heredocs, `python -c` or earlier file writes) |
-| `feedback` | the output of an action (`call_id` = `action`); later results through `write_stdin` or a `result` call (own `call_id`, `tool`, `command`/`args`) | `action`, `text`, `exit_code`, `images` |
+| `action` | act calls, including text typed into a running process (`tool: write_stdin`, the text in `args.chars`) | `call_id`, `tool`, `command` or `args`, `code` (only when the command does not contain it: a file written or patched earlier) |
+| `feedback` | the output of an action (`call_id` = `action`); later results through a `write_stdin` poll or a `result` call (own `call_id`, `tool`, `command`/`args`) | `action`, `text`, `exit_code`, `images` |
 | `other` | aux calls with their output; `kind: compaction` / `turn_aborted` | as observation, or `text` |
 
 A rationale entry repeats a value that is also in its call's command or arguments, has the call's `seq` and comes
 right before it. `text` is present whenever the recording has an output (possibly empty); the exec header Codex
 puts before shell output (wall time, exit line) is not part of `text`, its exit code is `exit_code`. Texts are
-whole unless `--max-chars N` is given. System prompts and environment context are not exported.
+whole unless `--max-chars N` is given; terminal colour codes and progress-bar redraws (`\r`) are removed. System
+prompts and environment context are not exported, also where older Codex versions wrote them as typed messages. An
+MCP result recorded as a JSON string or only in its end event is read as text and images.
 
 Images sit on the piece they arrived with, in recorded order; `null` keeps the place of an image whose bytes the
 recording lacks (a remote URL, a broken data URL) and of every image with `--images none`.

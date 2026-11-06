@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import shutil
 
-from . import adapters, profile as profile_mod, report as report_mod, steps as steps_mod
+from . import adapters, codex, profile as profile_mod, report as report_mod, steps as steps_mod
 from .codex import read_rollout
 from .redact import Redactor
 
@@ -132,10 +132,9 @@ class Writer:
         source = {"rollout_file": self.redactor.text(str(path)), "rollout_sha256": rollout.sha256,
                   "lines": rollout.stats.get("lines"), "warnings": len(rollout.warnings),
                   "profiles": profile.names, "episodes": []}
-        date = (rollout.started or "")[:10] or "undated"
-        thread = rollout.thread_id.replace("-", "")[:8]
+        base = unique_name(self.out / "episodes", rollout, "_00")
         for number, (hint, group) in enumerate(episodes):
-            episode_id = f"{date}_{thread}_{number:02d}"
+            episode_id = f"{base}_{number:02d}"
             folder = self.out / "episodes" / episode_id
             folder.mkdir(parents=True)
             is_last = number == len(episodes) - 1
@@ -231,14 +230,25 @@ def coverage(group):
     }
 
 
-def prepare_out(out: Path, overwrite: bool):
+def unique_name(parent: Path, rollout, suffix=""):
+    """<date>_<first 8 of the thread id>, with _2, _3… when a session started within the same minute has it."""
+    base = f"{(rollout.started or '')[:10] or 'undated'}_{rollout.thread_id.replace('-', '')[:8]}"
+    name, n = base, 1
+    while (parent / f"{name}{suffix}").exists():
+        n += 1
+        name = f"{base}_{n}"
+    return name
+
+
+def prepare_out(out: Path, overwrite: bool, folder="episodes", schema=MANIFEST_SCHEMA):
     if out.exists() and any(out.iterdir()):
         if not overwrite:
             raise SystemExit(f"{out} is not empty; choose a new directory or pass --overwrite")
-        if not (out / "manifest.json").exists():
-            raise SystemExit(f"refusing to overwrite {out}: it does not look like a previous export")
-        shutil.rmtree(out / "episodes", ignore_errors=True)
-        (out / "manifest.json").unlink()
+        manifest = out / "manifest.json"
+        if not manifest.exists() or json.loads(manifest.read_text(encoding="utf-8")).get("schema") != schema:
+            raise SystemExit(f"refusing to overwrite {out}: it is not a previous export of this kind")
+        shutil.rmtree(out / folder, ignore_errors=True)
+        manifest.unlink()
     out.mkdir(parents=True, exist_ok=True)
 
 
@@ -246,8 +256,13 @@ def export(paths, out, options: Options, overwrite=False, log=print):
     out = Path(out)
     prepare_out(out, overwrite)
     writer = Writer(out, options)
+    paths = list(dict.fromkeys(map(Path, paths)))
+    copies = codex.copies(paths)
     for path in paths:
-        path = Path(path)
+        if path in copies:
+            writer.skip(path, f"copy of {copies[path].name}")
+            log(f"skip {path.name}: copy of {copies[path].name}")
+            continue
         try:
             rollout, profile, episodes, final, report = analyse(path, options)
         except Exception as exc:  # one broken rollout must not stop a batch

@@ -156,7 +156,8 @@ def _step(step):
     if outcome["output"]:
         out += _block(_readable(outcome["output"]), "", limit=15)
     for result in outcome["results"]:
-        out += ["", f"Result delivered by `{result['signature']}`:"] + _block(_readable(result.get("output")), "", 12)
+        if result.get("output") is not None:
+            out += ["", f"Result delivered by `{result['signature']}`:"] + _block(_readable(result["output"]), "", 12)
     out += _images(outcome["images"])
     return out + [""]
 

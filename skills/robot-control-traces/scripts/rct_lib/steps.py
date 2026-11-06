@@ -8,6 +8,7 @@ and any later ``result`` calls (polls, stdin reads) are its outcome.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import shlex
 
 from . import calls as calls_mod
 from . import shell
+from .codex import typed_input
 from .profile import tool_kind
 
 SCHEMA = "robot-control-trace/v1"
@@ -173,10 +175,26 @@ def prepare(rollout, profile, read_local=False):
             event.signature = event.tool
         base = (event.tool or "").split(".")[-1]
         if base == "write_stdin" and event.continuation_of in by_seq:
-            origin = by_seq[event.continuation_of]
-            event.role, event.rule = ("result" if origin.role == "act" else "ignore"), "stdin_continuation"
+            target = by_seq[event.continuation_of]
+            if typed_input(event):
+                event.code, event.code_source = event.args["chars"], "stdin"
+                event.role, event.rule = _typed_role(event, target, by_seq, profile)
+            else:
+                event.role, event.rule = ("result" if target.role == "act" else "ignore"), "stdin_continuation"
         else:
             event.role, event.rule = profile.classify(event, tool_kind(event))
+
+
+def _typed_role(event, target, by_seq, profile):
+    """Typed input is classified like a command that runs it; input no rule knows acts when an act call started the
+    process."""
+    typed = dataclasses.replace(event, command=event.code, skeleton=shell.skeleton(event.code))
+    role, rule = profile.classify(typed, "shell")
+    if rule != "unmatched":
+        return role, rule
+    while target.continuation_of in by_seq:
+        target = by_seq[target.continuation_of]
+    return ("act", "default:stdin_input") if target.role == "act" else (role, rule)
 
 
 # ---- segmentation -----------------------------------------------------------------------------------------------
@@ -285,7 +303,10 @@ def segment(rollout, profile, limit=4000):
             steps.append(make_step(rollout, event, buffer, profile, limit, steps[-1] if steps else None))
             buffer = _Buffer()
         elif event.kind == "tool_call" and event.role == "result" and steps:
-            steps[-1]["outcome"]["results"].append(call_record(event, limit))
+            record = call_record(event, limit)
+            if event.rule == "stdin_continuation":
+                record["output"] = None  # already appended to the output of the call it polled
+            steps[-1]["outcome"]["results"].append(record)
             steps[-1]["outcome"]["images"] += [image_ref(rollout, k, event.signature) for k in event.images]
             steps[-1]["_results"] = steps[-1].get("_results", []) + [event]
         elif event.kind == "tool_call" and event.role == "ignore":
